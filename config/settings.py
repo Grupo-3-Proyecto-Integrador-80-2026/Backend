@@ -129,7 +129,7 @@ MAILERS = {
 
 AUTH_USER_MODEL = 'eventos.User'
 
-CORS_ALLOWED_ORIGINS = [ "https://frontend-zeta-six-hvm0b3059n.vercel.app", ]
+CORS_ALLOWED_ORIGINS = [ "https://frontend-zeta-six-hvm0b3059n.vercel.app", "http://localhost:5173"]
 
 STATIC_ROOT = BASE_DIR / 'staticfiles' 
 STORAGES = { "staticfiles": { "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage", }, }
