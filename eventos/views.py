@@ -36,7 +36,7 @@ class EventListCreateAPIView(APIView):
     def get(self, request):
         """Lista todos los eventos pertenecientes al usuario actual."""
         user = resolve_request_user(request)
-        events = Event.objects.filter(user=user)
+        events = Event.objects.filter(user=user).prefetch_related("subtasks")
         serializer = EventSerializer(events, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
