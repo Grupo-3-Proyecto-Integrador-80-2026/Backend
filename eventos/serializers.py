@@ -27,7 +27,7 @@ class LogisticSubtaskSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "event", "created_at", "updated_at"]
 
     def validate_estimated_hours(self, value):
         """
