@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'eventos',
     'corsheaders',
     'rest_framework',
+    'drf_spectacular',
 ]
 
 MIDDLEWARE = [
@@ -134,3 +135,15 @@ CORS_ALLOWED_ORIGINS = [ "https://frontend-zeta-six-hvm0b3059n.vercel.app", "htt
 
 STATIC_ROOT = BASE_DIR / 'staticfiles' 
 STORAGES = { "staticfiles": { "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage", }, }
+
+# Configuración de Django REST Framework y Swagger
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'API Organizador de Eventos Independientes',
+    'DESCRIPTION': 'Documentación interactiva de la API para gestión de eventos y logística.',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+}
