@@ -1,13 +1,14 @@
 """
 Vistas y controladores API REST para el Mini-proyecto 1.
 Implementa endpoints para eventos y subtareas logísticas cumpliendo con US-01, US-02 y US-03.
+Documentado con Swagger / OpenAPI mediante drf-spectacular.
 """
 
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from django.shortcuts import get_object_or_404
 from django.http import JsonResponse
+from drf_spectacular.utils import extend_schema
 
 from .models import User, Event, LogisticSubtask
 from .serializers import EventSerializer, LogisticSubtaskSerializer
@@ -28,22 +29,26 @@ def db_test(request):
 
 
 class EventListCreateAPIView(APIView):
-    """
-    Endpoint para listar eventos del usuario actual y crear nuevos eventos (US-01 / PI-14).
-    Ruta: /api/events/
-    """
+    """Gestión de listado y creación de eventos."""
 
+    @extend_schema(
+        summary="Listar eventos",
+        description="Obtiene todos los eventos asociados al usuario actual.",
+        responses={200: EventSerializer(many=True)}
+    )
     def get(self, request):
-        """Lista todos los eventos pertenecientes al usuario actual."""
         user = resolve_request_user(request)
         events = Event.objects.filter(user=user).prefetch_related("subtasks")
         serializer = EventSerializer(events, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @extend_schema(
+        summary="Crear un evento",
+        description="Crea un nuevo evento asociado al usuario actual.",
+        request=EventSerializer,
+        responses={201: EventSerializer, 400: dict}
+    )
     def post(self, request):
-        """
-        Crea un nuevo evento asociado al usuario actual (demo en Sprint 1 o autenticado en Sprint 2).
-        """
         user = resolve_request_user(request)
         serializer = EventSerializer(data=request.data)
 
@@ -58,23 +63,21 @@ class EventListCreateAPIView(APIView):
 
 
 class EventDetailAPIView(APIView):
-    """
-    Endpoint para obtener, actualizar parcialmente y eliminar un evento (US-03 / PI-38, PI-39).
-    Ruta: /api/events/<int:event_id>/
-    """
+    """Gestión individual de un evento (detalle, actualización, eliminación)."""
 
     def _get_event(self, request, event_id):
-        """
-        Obtiene el evento validando que exista y pertenezca al usuario (PI-29, PI-39).
-        """
         user = resolve_request_user(request)
         try:
             return Event.objects.get(id=event_id, user=user)
         except Event.DoesNotExist:
             return None
 
+    @extend_schema(
+        summary="Obtener detalle de un evento",
+        description="Retorna el evento especificado con su lista de subtareas.",
+        responses={200: EventSerializer, 404: dict}
+    )
     def get(self, request, event_id):
-        """Retorna el detalle del evento con sus subtareas asociadas."""
         event = self._get_event(request, event_id)
         if not event:
             return Response(
@@ -85,8 +88,13 @@ class EventDetailAPIView(APIView):
         serializer = EventSerializer(event)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @extend_schema(
+        summary="Actualizar parcialmente un evento",
+        description="Modifica campos específicos de un evento.",
+        request=EventSerializer,
+        responses={200: EventSerializer, 400: dict, 404: dict}
+    )
     def patch(self, request, event_id):
-        """Actualización parcial de atributos del evento."""
         event = self._get_event(request, event_id)
         if not event:
             return Response(
@@ -104,8 +112,12 @@ class EventDetailAPIView(APIView):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    @extend_schema(
+        summary="Eliminar un evento",
+        description="Elimina el evento y todas sus subtareas en cascada.",
+        responses={200: dict, 404: dict}
+    )
     def delete(self, request, event_id):
-        """Elimina un evento y sus subtareas en cascada."""
         event = self._get_event(request, event_id)
         if not event:
             return Response(
@@ -121,10 +133,7 @@ class EventDetailAPIView(APIView):
 
 
 class EventSubtaskListCreateAPIView(APIView):
-    """
-    Endpoint para listar y crear subtareas logísticas dentro de un evento (US-02 / PI-27, PI-29).
-    Ruta: /api/events/<int:event_id>/subtasks/
-    """
+    """Gestión de subtareas logísticas asociadas a un evento."""
 
     def _get_event(self, request, event_id):
         user = resolve_request_user(request)
@@ -133,8 +142,12 @@ class EventSubtaskListCreateAPIView(APIView):
         except Event.DoesNotExist:
             return None
 
+    @extend_schema(
+        summary="Listar subtareas de un evento",
+        description="Obtiene todas las gestiones logísticas pertenecientes a un evento.",
+        responses={200: LogisticSubtaskSerializer(many=True), 404: dict}
+    )
     def get(self, request, event_id):
-        """Retorna todas las subtareas asociadas a un evento."""
         event = self._get_event(request, event_id)
         if not event:
             return Response(
@@ -146,8 +159,13 @@ class EventSubtaskListCreateAPIView(APIView):
         serializer = LogisticSubtaskSerializer(subtasks, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @extend_schema(
+        summary="Crear una subtarea en un evento",
+        description="Crea una gestión logística dentro del evento indicado.",
+        request=LogisticSubtaskSerializer,
+        responses={201: LogisticSubtaskSerializer, 400: dict, 404: dict}
+    )
     def post(self, request, event_id):
-        """Crea una nueva subtarea logística ligada al evento referenciado."""
         event = self._get_event(request, event_id)
         if not event:
             return Response(
@@ -157,7 +175,6 @@ class EventSubtaskListCreateAPIView(APIView):
 
         serializer = LogisticSubtaskSerializer(data=request.data)
         if serializer.is_valid():
-            # Pasamos el evento verificado directamente al guardar
             serializer.save(event=event)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -168,10 +185,7 @@ class EventSubtaskListCreateAPIView(APIView):
 
 
 class SubtaskDetailAPIView(APIView):
-    """
-    Endpoint para consultar, actualizar (PATCH) y eliminar (DELETE) una subtarea individual (US-03 / PI-38, PI-39).
-    Ruta: /api/subtasks/<int:subtask_id>/
-    """
+    """Gestión individual de una subtarea (consultar, modificar o eliminar)."""
 
     def _get_subtask(self, request, subtask_id):
         user = resolve_request_user(request)
@@ -180,8 +194,12 @@ class SubtaskDetailAPIView(APIView):
         except LogisticSubtask.DoesNotExist:
             return None
 
+    @extend_schema(
+        summary="Obtener detalle de una subtarea",
+        description="Consulta los datos de una subtarea logística específica.",
+        responses={200: LogisticSubtaskSerializer, 404: dict}
+    )
     def get(self, request, subtask_id):
-        """Consulta el estado y datos de una subtarea puntual."""
         subtask = self._get_subtask(request, subtask_id)
         if not subtask:
             return Response(
@@ -192,8 +210,13 @@ class SubtaskDetailAPIView(APIView):
         serializer = LogisticSubtaskSerializer(subtask)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
+    @extend_schema(
+        summary="Actualizar parcialmente una subtarea",
+        description="Permite reprogramar fechas, actualizar estado (hecho/pospuesto), horas estimadas o notas.",
+        request=LogisticSubtaskSerializer,
+        responses={200: LogisticSubtaskSerializer, 400: dict, 404: dict}
+    )
     def patch(self, request, subtask_id):
-        """Actualiza parcialmente una subtarea (reprogramación, estado, horas, notas)."""
         subtask = self._get_subtask(request, subtask_id)
         if not subtask:
             return Response(
@@ -214,8 +237,12 @@ class SubtaskDetailAPIView(APIView):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    @extend_schema(
+        summary="Eliminar una subtarea",
+        description="Elimina la gestión logística especificada.",
+        responses={200: dict, 404: dict}
+    )
     def delete(self, request, subtask_id):
-        """Elimina la subtarea logística especificada."""
         subtask = self._get_subtask(request, subtask_id)
         if not subtask:
             return Response(
