@@ -82,6 +82,7 @@ class TodaySubtaskSerializer(serializers.ModelSerializer):
 
     event_id = serializers.IntegerField(source="event.id", read_only=True)
     event_name = serializers.CharField(source="event.name", read_only=True)
+    is_overdue = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = LogisticSubtask
@@ -95,4 +96,5 @@ class TodaySubtaskSerializer(serializers.ModelSerializer):
             "estimated_hours",
             "priority",
             "status",
+            "is_overdue",
         ]
