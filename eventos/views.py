@@ -311,7 +311,7 @@ class TodayAPIView(APIView):
             LogisticSubtask.objects.filter(event__user=user)
             .exclude(status=LogisticSubtask.Status.DONE)
             .select_related("event")
-            .order_by("scheduled_date", "id")
+            .order_by("scheduled_date", "estimated_hours", "id")
         )
 
         overdue = subtasks.overdue(today)
