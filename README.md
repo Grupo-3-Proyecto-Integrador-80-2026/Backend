@@ -24,6 +24,17 @@ Proyecto Integrador I (750018C, 2026-II), Universidad del Valle.
 6. `python manage.py migrate`
 7. `python manage.py runserver`
 
+### Datos de ejemplo
+
+Para tener eventos y gestiones de prueba (vencidas, para hoy y próximas) en el usuario demo:
+
+```
+python manage.py cargar_datos_demo           # solo si el usuario demo no tiene eventos
+python manage.py cargar_datos_demo --reset   # reemplaza los eventos del usuario demo
+```
+
+Las fechas se calculan a partir del día en que se ejecuta. El comando solo modifica datos del usuario demo; revisa a qué base apunta tu `DATABASE_URL` antes de correrlo.
+
 ## Endpoints
 
 | Método | Ruta | Descripción |
