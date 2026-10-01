@@ -171,3 +171,46 @@ class FiltersPreserveGroupingAndOrderTests(TestCase):
         plain = self.client.get("/api/today/").json()
         filtered = self.client.get("/api/today/?status=pending").json()
         self.assertEqual(plain.keys(), filtered.keys())
+
+
+class TodayFilterValidationTests(TestCase):
+    def get(self, query):
+        return self.client.get(f"/api/today/{query}")
+
+    def assert_invalid(self, query, *fields):
+        response = self.get(query)
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn("error", body)
+        for field in fields:
+            self.assertIn(field, body["details"])
+
+    def test_non_numeric_event_is_rejected(self):
+        self.assert_invalid("?event=abc", "event")
+
+    def test_decimal_event_is_rejected(self):
+        self.assert_invalid("?event=1.5", "event")
+
+    def test_zero_and_negative_event_are_rejected(self):
+        self.assert_invalid("?event=0", "event")
+        self.assert_invalid("?event=-3", "event")
+
+    def test_unknown_status_is_rejected(self):
+        self.assert_invalid("?status=xyz", "status")
+
+    def test_both_invalid_report_both_fields(self):
+        self.assert_invalid("?event=abc&status=xyz", "event", "status")
+
+    def test_valid_params_return_200(self):
+        self.assertEqual(self.get("?event=1&status=pending").status_code, 200)
+
+    def test_empty_params_are_ignored(self):
+        self.assertEqual(self.get("?event=&status=").status_code, 200)
+
+    def test_nonexistent_event_returns_empty_groups(self):
+        response = self.get("?event=999")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(
+            (data["overdue"], data["due_today"], data["upcoming"]), ([], [], [])
+        )

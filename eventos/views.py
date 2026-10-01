@@ -15,6 +15,7 @@ from .models import UPCOMING_WINDOW_DAYS, Event, LogisticSubtask, User
 from .serializers import (
     EventSerializer,
     LogisticSubtaskSerializer,
+    TodayFilterSerializer,
     TodaySubtaskSerializer,
 )
 from .utils import resolve_request_user
@@ -297,9 +298,9 @@ class SubtaskDetailAPIView(APIView):
 class TodayAPIView(APIView):
     """Gestiones del usuario agrupadas en vencidas / para hoy / próximas (US-04, PI-54)."""
 
-    def _base_queryset(self, request, user):
+    def _base_queryset(self, user, filters):
         """
-        Queryset de la vista Hoy: filtros opcionales (US-05) + orden de la US-04.
+        Queryset de la vista Hoy: filtros validados (US-05) + orden de la US-04.
 
         Los filtros solo reducen el conjunto; el orden se define aquí y la
         agrupación se hace después, así que ninguno de los dos se altera.
@@ -311,13 +312,11 @@ class TodayAPIView(APIView):
             .order_by("scheduled_date", "estimated_hours", "id")
         )
 
-        event_id = request.query_params.get("event")
-        if event_id:
-            subtasks = subtasks.filter(event_id=event_id)
+        if "event" in filters:
+            subtasks = subtasks.filter(event_id=filters["event"])
 
-        status_value = request.query_params.get("status")
-        if status_value:
-            subtasks = subtasks.filter(status=status_value)
+        if "status" in filters:
+            subtasks = subtasks.filter(status=filters["status"])
 
         return subtasks
 
@@ -340,13 +339,23 @@ class TodayAPIView(APIView):
                 description="Estado de la gestión por el que filtrar.",
             ),
         ],
-        responses={200: dict},
+        responses={200: dict, 400: dict},
     )
     def get(self, request):
         user = resolve_request_user(request)
         today = timezone.localdate()
 
-        subtasks = self._base_queryset(request, user)
+        filters = TodayFilterSerializer(data=request.query_params)
+        if not filters.is_valid():
+            return Response(
+                {
+                    "error": "Parámetros de filtro inválidos.",
+                    "details": filters.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        subtasks = self._base_queryset(user, filters.validated_data)
 
         overdue = subtasks.overdue(today)
         due_today = subtasks.filter(scheduled_date=today)
