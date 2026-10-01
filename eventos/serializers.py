@@ -98,3 +98,29 @@ class TodaySubtaskSerializer(serializers.ModelSerializer):
             "status",
             "is_overdue",
         ]
+
+
+_ALLOWED_STATUS = ", ".join(LogisticSubtask.Status.values)
+
+
+class TodayFilterSerializer(serializers.Serializer):
+    """Valida los parámetros de consulta opcionales de GET /api/today/ (US-05)."""
+
+    event = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        error_messages={
+            "invalid": "El filtro 'event' debe ser un número entero.",
+            "min_value": "El filtro 'event' debe ser un ID válido (mayor a 0).",
+        },
+    )
+    status = serializers.ChoiceField(
+        choices=LogisticSubtask.Status.choices,
+        required=False,
+        error_messages={
+            "invalid_choice": (
+                f"El estado '{{input}}' no es válido. "
+                f"Valores permitidos: {_ALLOWED_STATUS}."
+            ),
+        },
+    )
