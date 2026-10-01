@@ -214,3 +214,66 @@ class TodayFilterValidationTests(TestCase):
         self.assertEqual(
             (data["overdue"], data["due_today"], data["upcoming"]), ([], [], [])
         )
+
+
+class LoginTests(TestCase):
+    URL = "/api/auth/login/"
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "elena",
+            email="elena@eventos.com",
+            password="Secreta123",
+            first_name="Elena",
+            last_name="Morales",
+        )
+
+    def post(self, payload):
+        return self.client.post(self.URL, payload, content_type="application/json")
+
+    def test_login_success(self):
+        response = self.post({"email": "elena@eventos.com", "password": "Secreta123"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["user"]["email"], "elena@eventos.com")
+        self.assertNotIn("password", body["user"])
+        self.assertEqual(self.client.session["_auth_user_id"], str(self.user.pk))
+
+    def test_email_is_case_insensitive(self):
+        response = self.post({"email": "ELENA@eventos.com", "password": "Secreta123"})
+        self.assertEqual(response.status_code, 200)
+
+    def test_wrong_password_returns_generic_error(self):
+        response = self.post({"email": "elena@eventos.com", "password": "otra"})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {"error": "Credenciales inválidas"})
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_unknown_email_is_indistinguishable_from_wrong_password(self):
+        wrong_password = self.post({"email": "elena@eventos.com", "password": "otra"})
+        unknown_email = self.post({"email": "nadie@eventos.com", "password": "otra"})
+        self.assertEqual(wrong_password.status_code, unknown_email.status_code)
+        self.assertEqual(wrong_password.json(), unknown_email.json())
+
+    def test_inactive_user_gets_same_generic_error(self):
+        self.user.is_active = False
+        self.user.save()
+        response = self.post({"email": "elena@eventos.com", "password": "Secreta123"})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {"error": "Credenciales inválidas"})
+
+    def test_missing_fields_are_rejected(self):
+        response = self.post({})
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn("error", body)
+        self.assertIn("email", body["details"])
+        self.assertIn("password", body["details"])
+
+    def test_malformed_email_is_rejected(self):
+        response = self.post({"email": "no-es-un-correo", "password": "x"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("email", response.json()["details"])
+
+    def test_get_is_not_allowed(self):
+        self.assertEqual(self.client.get(self.URL).status_code, 405)

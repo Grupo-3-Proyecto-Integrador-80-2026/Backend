@@ -31,4 +31,7 @@ urlpatterns = [
     ),
     # US-04: Vista Hoy
     path("today/", views.TodayAPIView.as_view(), name="today"),
+
+    # US-11: Autenticación
+    path("auth/login/", views.LoginAPIView.as_view(), name="auth-login"),
 ]
