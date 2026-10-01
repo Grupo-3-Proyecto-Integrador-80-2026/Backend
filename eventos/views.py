@@ -297,6 +297,30 @@ class SubtaskDetailAPIView(APIView):
 class TodayAPIView(APIView):
     """Gestiones del usuario agrupadas en vencidas / para hoy / próximas (US-04, PI-54)."""
 
+    def _base_queryset(self, request, user):
+        """
+        Queryset de la vista Hoy: filtros opcionales (US-05) + orden de la US-04.
+
+        Los filtros solo reducen el conjunto; el orden se define aquí y la
+        agrupación se hace después, así que ninguno de los dos se altera.
+        """
+        subtasks = (
+            LogisticSubtask.objects.filter(event__user=user)
+            .exclude(status=LogisticSubtask.Status.DONE)
+            .select_related("event")
+            .order_by("scheduled_date", "estimated_hours", "id")
+        )
+
+        event_id = request.query_params.get("event")
+        if event_id:
+            subtasks = subtasks.filter(event_id=event_id)
+
+        status_value = request.query_params.get("status")
+        if status_value:
+            subtasks = subtasks.filter(status=status_value)
+
+        return subtasks
+
     @extend_schema(
         summary="Vista Hoy",
         description="Devuelve las gestiones agrupadas en vencidas, para hoy y próximas "
@@ -322,21 +346,7 @@ class TodayAPIView(APIView):
         user = resolve_request_user(request)
         today = timezone.localdate()
 
-        subtasks = (
-            LogisticSubtask.objects.filter(event__user=user)
-            .exclude(status=LogisticSubtask.Status.DONE)
-            .select_related("event")
-            .order_by("scheduled_date", "estimated_hours", "id")
-        )
-
-        # Filtros opcionales (US-05)
-        event_id = request.query_params.get("event")
-        if event_id:
-            subtasks = subtasks.filter(event_id=event_id)
-
-        status_value = request.query_params.get("status")
-        if status_value:
-            subtasks = subtasks.filter(status=status_value)
+        subtasks = self._base_queryset(request, user)
 
         overdue = subtasks.overdue(today)
         due_today = subtasks.filter(scheduled_date=today)

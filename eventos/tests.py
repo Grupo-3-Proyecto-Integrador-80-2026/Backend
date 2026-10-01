@@ -81,3 +81,93 @@ class TodayTieBreakTests(TestCase):
         self.make("lejana_corta", 4, "0.5")
         self.make("cercana_larga", 1, "8.0")
         self.assertEqual(self.names("upcoming"), ["cercana_larga", "lejana_corta"])
+
+
+class FiltersPreserveGroupingAndOrderTests(TestCase):
+    GROUPS = ("overdue", "due_today", "upcoming")
+
+    def setUp(self):
+        self.today = timezone.localdate()
+        user = User.objects.create_user("demo_user", password="x")
+        self.ev1 = Event.objects.create(
+            user=user, name="Evento 1", event_date=self.today
+        )
+        self.ev2 = Event.objects.create(
+            user=user, name="Evento 2", event_date=self.today
+        )
+        # (evento, nombre, días desde hoy, horas, estado)
+        rows = [
+            (self.ev1, "o1", -3, "2.0", "pending"),
+            (self.ev1, "o2", -3, "1.0", "in_progress"),  # empate con o1
+            (self.ev2, "o3", -1, "1.0", "pending"),
+            (self.ev1, "h1", 0, "3.0", "pending"),
+            (self.ev2, "h2", 0, "1.0", "in_progress"),
+            (self.ev1, "u1", 2, "1.0", "pending"),
+            (self.ev1, "u2", 2, "0.5", "postponed"),  # empate con u1
+            (self.ev2, "u3", 3, "2.0", "postponed"),
+            (self.ev2, "u4", 1, "1.0", "pending"),
+        ]
+        for event, name, days, hours, status in rows:
+            LogisticSubtask.objects.create(
+                event=event,
+                name=name,
+                scheduled_date=self.today + timedelta(days=days),
+                estimated_hours=hours,
+                status=status,
+            )
+
+    def groups(self, query=""):
+        data = self.client.get(f"/api/today/{query}").json()
+        return {g: [t["name"] for t in data[g]] for g in self.GROUPS}
+
+    def assert_filter_only_removes(self, query, matching_names):
+        """El resultado filtrado == el sin filtrar, quitando lo que no coincide."""
+        unfiltered = self.groups()
+        expected = {
+            g: [n for n in unfiltered[g] if n in matching_names] for g in self.GROUPS
+        }
+        self.assertEqual(self.groups(query), expected)
+
+    def test_unfiltered_baseline_order(self):
+        self.assertEqual(
+            self.groups(),
+            {
+                "overdue": ["o2", "o1", "o3"],
+                "due_today": ["h2", "h1"],
+                "upcoming": ["u4", "u2", "u1", "u3"],
+            },
+        )
+
+    def test_event_filter_keeps_groups_and_order(self):
+        names = set(
+            LogisticSubtask.objects.filter(event=self.ev1).values_list(
+                "name", flat=True
+            )
+        )
+        self.assert_filter_only_removes(f"?event={self.ev1.id}", names)
+
+    def test_status_filter_keeps_groups_and_order(self):
+        names = set(
+            LogisticSubtask.objects.filter(status="pending").values_list(
+                "name", flat=True
+            )
+        )
+        self.assert_filter_only_removes("?status=pending", names)
+
+    def test_combined_filter_keeps_groups_and_order(self):
+        names = set(
+            LogisticSubtask.objects.filter(
+                event=self.ev1, status="pending"
+            ).values_list("name", flat=True)
+        )
+        self.assert_filter_only_removes(f"?event={self.ev1.id}&status=pending", names)
+
+    def test_tie_break_survives_filtering(self):
+        groups = self.groups(f"?event={self.ev1.id}")
+        self.assertEqual(groups["overdue"], ["o2", "o1"])
+        self.assertEqual(groups["upcoming"], ["u2", "u1"])
+
+    def test_filtered_response_keeps_same_shape(self):
+        plain = self.client.get("/api/today/").json()
+        filtered = self.client.get("/api/today/?status=pending").json()
+        self.assertEqual(plain.keys(), filtered.keys())
