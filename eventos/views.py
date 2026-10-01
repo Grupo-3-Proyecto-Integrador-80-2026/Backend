@@ -6,12 +6,12 @@ Documentado con Swagger / OpenAPI mediante drf-spectacular.
 
 from django.http import JsonResponse
 from django.utils import timezone
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Event, LogisticSubtask, User
+from .models import UPCOMING_WINDOW_DAYS, Event, LogisticSubtask, User
 from .serializers import (
     EventSerializer,
     LogisticSubtaskSerializer,
@@ -299,8 +299,23 @@ class TodayAPIView(APIView):
 
     @extend_schema(
         summary="Vista Hoy",
-        description="Devuelve las gestiones agrupadas en vencidas, para hoy y próximas, "
-        "ordenadas por fecha objetivo ascendente.",
+        description="Devuelve las gestiones agrupadas en vencidas, para hoy y próximas "
+        "(ventana de 7 días), con filtros opcionales por evento y por estado.",
+        parameters=[
+            OpenApiParameter(
+                "event",
+                int,
+                required=False,
+                description="ID del evento por el que filtrar.",
+            ),
+            OpenApiParameter(
+                "status",
+                str,
+                required=False,
+                enum=LogisticSubtask.Status.values,
+                description="Estado de la gestión por el que filtrar.",
+            ),
+        ],
         responses={200: dict},
     )
     def get(self, request):
@@ -314,6 +329,15 @@ class TodayAPIView(APIView):
             .order_by("scheduled_date", "estimated_hours", "id")
         )
 
+        # Filtros opcionales (US-05)
+        event_id = request.query_params.get("event")
+        if event_id:
+            subtasks = subtasks.filter(event_id=event_id)
+
+        status_value = request.query_params.get("status")
+        if status_value:
+            subtasks = subtasks.filter(status=status_value)
+
         overdue = subtasks.overdue(today)
         due_today = subtasks.filter(scheduled_date=today)
         upcoming = subtasks.upcoming(today)
@@ -321,6 +345,7 @@ class TodayAPIView(APIView):
         return Response(
             {
                 "today": today.isoformat(),
+                "upcoming_window_days": UPCOMING_WINDOW_DAYS,
                 "overdue": TodaySubtaskSerializer(overdue, many=True).data,
                 "due_today": TodaySubtaskSerializer(due_today, many=True).data,
                 "upcoming": TodaySubtaskSerializer(upcoming, many=True).data,
