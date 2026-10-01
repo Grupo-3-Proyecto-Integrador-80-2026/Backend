@@ -3,7 +3,9 @@ Serializadores DRF para validación y transformación de datos en la API de even
 """
 
 from decimal import Decimal
+
 from rest_framework import serializers
+
 from .models import Event, LogisticSubtask
 
 
@@ -34,7 +36,9 @@ class LogisticSubtaskSerializer(serializers.ModelSerializer):
         Garantiza que las horas estimadas sean numéricas y estrictamente mayores a cero (PI-28).
         """
         if value is None or value <= Decimal("0"):
-            raise serializers.ValidationError("Las horas estimadas deben ser un valor mayor a 0.")
+            raise serializers.ValidationError(
+                "Las horas estimadas deben ser un valor mayor a 0."
+            )
         return value
 
 
@@ -42,6 +46,7 @@ class EventSerializer(serializers.ModelSerializer):
     """
     Serializador para eventos, con soporte para lectura de sus subtareas asociadas.
     """
+
     subtasks = LogisticSubtaskSerializer(many=True, read_only=True)
     total_subtasks = serializers.IntegerField(source="subtasks.count", read_only=True)
 
@@ -66,5 +71,30 @@ class EventSerializer(serializers.ModelSerializer):
     def validate_name(self, value):
         """Valida que el nombre no contenga únicamente espacios en blanco."""
         if not value.strip():
-            raise serializers.ValidationError("El nombre del evento no puede estar vacío.")
+            raise serializers.ValidationError(
+                "El nombre del evento no puede estar vacío."
+            )
         return value.strip()
+
+
+class TodaySubtaskSerializer(serializers.ModelSerializer):
+    """Gestión en la vista 'Hoy', con el evento al que pertenece."""
+
+    event_id = serializers.IntegerField(source="event.id", read_only=True)
+    event_name = serializers.CharField(source="event.name", read_only=True)
+    is_overdue = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = LogisticSubtask
+        fields = [
+            "id",
+            "name",
+            "type",
+            "event_id",
+            "event_name",
+            "scheduled_date",
+            "estimated_hours",
+            "priority",
+            "status",
+            "is_overdue",
+        ]

@@ -8,10 +8,15 @@ Define las entidades centrales:
 - LogisticSubtask: Tareas logísticas asociadas a un evento.
 """
 
+from datetime import timedelta
 from decimal import Decimal
-from django.db import models
+
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MinValueValidator
+from django.db import models
+from django.utils import timezone
+
+UPCOMING_WINDOW_DAYS = 7
 
 
 class User(AbstractUser):
@@ -19,9 +24,10 @@ class User(AbstractUser):
     Usuario del sistema (organizador de eventos).
     Extiende AbstractUser para preservar la seguridad y autenticación nativa de Django.
     """
+
     daily_hours_limit = models.PositiveIntegerField(
         default=6,
-        help_text="Límite de horas diarias que el usuario puede dedicar a gestiones logísticas."
+        help_text="Límite de horas diarias que el usuario puede dedicar a gestiones logísticas.",
     )
 
     class Meta:
@@ -40,6 +46,7 @@ class Event(models.Model):
 
     class EventType(models.TextChoices):
         """Tipos de eventos sugeridos por el alcance funcional."""
+
         WEDDING = "wedding", "Boda"
         SOCIAL = "social", "Social"
         CORPORATE = "corporate", "Corporativo"
@@ -48,6 +55,7 @@ class Event(models.Model):
 
     class Status(models.TextChoices):
         """Estado general del ciclo de vida del evento."""
+
         PLANNING = "planning", "Planeando"
         IN_PROGRESS = "in_progress", "En curso"
         FINISHED = "finished", "Finalizado"
@@ -56,36 +64,38 @@ class Event(models.Model):
         User,
         on_delete=models.CASCADE,
         related_name="events",
-        help_text="Usuario propietario del evento."
+        help_text="Usuario propietario del evento.",
     )
     name = models.CharField(max_length=200, help_text="Nombre del evento.")
     event_type = models.CharField(
         max_length=50,
         choices=EventType.choices,
         default=EventType.OTHER,
-        help_text="Tipo o categoría del evento."
+        help_text="Tipo o categoría del evento.",
     )
     contact = models.CharField(
         max_length=255,
         blank=True,
         default="",
-        help_text="Nombre o datos de contacto del cliente."
+        help_text="Nombre o datos de contacto del cliente.",
     )
     location = models.CharField(
         max_length=255,
         blank=True,
         default="",
-        help_text="Lugar físico o plazo límite general del evento."
+        help_text="Lugar físico o plazo límite general del evento.",
     )
     event_date = models.DateField(
         help_text="Fecha en la que se llevará a cabo el evento."
     )
-    description = models.TextField(blank=True, null=True, help_text="Descripción o notas del evento.")
+    description = models.TextField(
+        blank=True, null=True, help_text="Descripción o notas del evento."
+    )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
         default=Status.PLANNING,
-        help_text="Estado actual del evento."
+        help_text="Estado actual del evento.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -98,6 +108,25 @@ class Event(models.Model):
         return f"{self.name} ({self.get_event_type_display()})"
 
 
+class LogisticSubtaskQuerySet(models.QuerySet):
+    """Consultas reutilizables sobre gestiones logísticas."""
+
+    def overdue(self, today=None):
+        """Gestiones vencidas: fecha objetivo anterior a hoy y no terminadas."""
+        today = today or timezone.localdate()
+        return self.filter(scheduled_date__lt=today).exclude(
+            status=LogisticSubtask.Status.DONE  # <- aquí excluirías también POSTPONED si hiciera falta
+        )
+
+    def upcoming(self, today=None, days=UPCOMING_WINDOW_DAYS):
+        """Gestiones próximas: posteriores a hoy y dentro de la ventana."""
+        today = today or timezone.localdate()
+        limit = today + timedelta(days=days)
+        return self.filter(scheduled_date__gt=today, scheduled_date__lte=limit).exclude(
+            status=LogisticSubtask.Status.DONE
+        )
+
+
 class LogisticSubtask(models.Model):
     """
     Gestión logística específica dentro de un evento (T1, T2, T3, T4).
@@ -105,6 +134,7 @@ class LogisticSubtask(models.Model):
 
     class TaskType(models.TextChoices):
         """Tipos mínimos requeridos para clasificación logística."""
+
         BOOK_VENUE = "book_venue", "Reservar salón"
         SEND_INVITATIONS = "send_invitations", "Enviar invitaciones"
         CONFIRM_CATERING = "confirm_catering", "Confirmar catering"
@@ -122,18 +152,20 @@ class LogisticSubtask(models.Model):
         MEDIUM = "medium", "Media"
         HIGH = "high", "Alta"
 
+    objects = LogisticSubtaskQuerySet.as_manager()
+
     event = models.ForeignKey(
         Event,
         on_delete=models.CASCADE,
         related_name="subtasks",
-        help_text="Evento al que pertenece esta gestión."
+        help_text="Evento al que pertenece esta gestión.",
     )
     name = models.CharField(max_length=200, help_text="Nombre de la gestión logística.")
     type = models.CharField(
         max_length=50,
         choices=TaskType.choices,
         default=TaskType.OTHER,
-        help_text="Tipo de gestión logística."
+        help_text="Tipo de gestión logística.",
     )
     scheduled_date = models.DateField(
         help_text="Fecha objetivo o plazo planificado para ejecutar la gestión."
@@ -143,24 +175,22 @@ class LogisticSubtask(models.Model):
         decimal_places=1,
         default=Decimal("1.0"),
         validators=[MinValueValidator(Decimal("0.1"))],
-        help_text="Horas estimadas de trabajo (mayor a 0, entero o decimal simple)."
+        help_text="Horas estimadas de trabajo (mayor a 0, entero o decimal simple).",
     )
     priority = models.CharField(
         max_length=20,
         choices=Priority.choices,
         default=Priority.MEDIUM,
-        help_text="Nivel de prioridad de la gestión."
+        help_text="Nivel de prioridad de la gestión.",
     )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
         default=Status.PENDING,
-        help_text="Estado de ejecución de la gestión."
+        help_text="Estado de ejecución de la gestión.",
     )
     note = models.TextField(
-        blank=True,
-        null=True,
-        help_text="Nota de avance o motivo de postergación."
+        blank=True, null=True, help_text="Nota de avance o motivo de postergación."
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -172,3 +202,11 @@ class LogisticSubtask(models.Model):
 
     def __str__(self):
         return f"{self.name} - {self.event.name}"
+
+    @property
+    def is_overdue(self):
+        """True si la fecha objetivo ya pasó y la gestión no está hecha."""
+        return (
+            self.status != self.Status.DONE
+            and self.scheduled_date < timezone.localdate()
+        )
