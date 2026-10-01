@@ -8,12 +8,15 @@ Define las entidades centrales:
 - LogisticSubtask: Tareas logísticas asociadas a un evento.
 """
 
+from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MinValueValidator
 from django.db import models
 from django.utils import timezone
+
+UPCOMING_WINDOW_DAYS = 7
 
 
 class User(AbstractUser):
@@ -113,6 +116,14 @@ class LogisticSubtaskQuerySet(models.QuerySet):
         today = today or timezone.localdate()
         return self.filter(scheduled_date__lt=today).exclude(
             status=LogisticSubtask.Status.DONE  # <- aquí excluirías también POSTPONED si hiciera falta
+        )
+
+    def upcoming(self, today=None, days=UPCOMING_WINDOW_DAYS):
+        """Gestiones próximas: posteriores a hoy y dentro de la ventana."""
+        today = today or timezone.localdate()
+        limit = today + timedelta(days=days)
+        return self.filter(scheduled_date__gt=today, scheduled_date__lte=limit).exclude(
+            status=LogisticSubtask.Status.DONE
         )
 
 

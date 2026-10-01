@@ -316,7 +316,7 @@ class TodayAPIView(APIView):
 
         overdue = subtasks.overdue(today)
         due_today = subtasks.filter(scheduled_date=today)
-        upcoming = subtasks.filter(scheduled_date__gt=today)
+        upcoming = subtasks.upcoming(today)
 
         return Response(
             {
