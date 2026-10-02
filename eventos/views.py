@@ -202,7 +202,7 @@ class EventSubtaskListCreateAPIView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        serializer = LogisticSubtaskSerializer(data=request.data)
+        serializer = LogisticSubtaskSerializer(data=request.data, context={"event": event})
         if serializer.is_valid():
             serializer.save(event=event)
             return Response(serializer.data, status=status.HTTP_201_CREATED)

@@ -481,7 +481,7 @@ class NoDemoUserTests(TestCase):
             {
                 "name": "Reservar salón",
                 "type": "book_venue",
-                "scheduled_date": "2026-12-01",
+                "scheduled_date": event.event_date.isoformat(),
                 "estimated_hours": 2,
             },
         )
@@ -630,3 +630,115 @@ class CsrfFlowTests(TestCase):
             HTTP_X_CSRFTOKEN=self.token,
         )
         self.assertEqual(response.status_code, 201)
+
+
+class EventDateNotInPastTests(TestCase):
+    """La fecha de un evento no puede ser anterior a hoy (al crear ni al cambiarla)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "elena@eventos.com", email="elena@eventos.com", password="Secreta123"
+        )
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+
+    def post(self, date):
+        return self.client.post(
+            "/api/events/",
+            {"name": "Boda", "event_date": date.isoformat()},
+            content_type="application/json",
+        )
+
+    def test_past_date_is_rejected_on_create(self):
+        response = self.post(self.today - timedelta(days=1))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["details"]["event_date"],
+            ["La fecha del evento no puede ser anterior a hoy."],
+        )
+        self.assertFalse(Event.objects.exists())
+
+    def test_today_and_future_dates_are_allowed(self):
+        self.assertEqual(self.post(self.today).status_code, 201)
+        self.assertEqual(self.post(self.today + timedelta(days=30)).status_code, 201)
+
+    def test_past_event_can_be_edited_keeping_its_date(self):
+        past = self.today - timedelta(days=10)
+        event = Event.objects.create(user=self.user, name="Pasado", event_date=past)
+        response = self.client.patch(
+            f"/api/events/{event.id}/",
+            {"name": "Pasado (editado)", "event_date": past.isoformat()},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_cannot_move_event_to_another_past_date(self):
+        event = Event.objects.create(user=self.user, name="Boda", event_date=self.today)
+        response = self.client.patch(
+            f"/api/events/{event.id}/",
+            {"event_date": (self.today - timedelta(days=3)).isoformat()},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+
+class SubtaskDateRangeTests(TestCase):
+    """La fecha objetivo de una gestión debe estar entre hoy y la fecha del evento."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "elena@eventos.com", email="elena@eventos.com", password="Secreta123"
+        )
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+        self.event = Event.objects.create(
+            user=self.user, name="Boda", event_date=self.today + timedelta(days=10)
+        )
+
+    def create(self, date):
+        return self.client.post(
+            f"/api/events/{self.event.id}/subtasks/",
+            {"name": "Reservar salón", "scheduled_date": date.isoformat(), "estimated_hours": 2},
+            content_type="application/json",
+        )
+
+    def test_dates_between_today_and_event_are_allowed(self):
+        self.assertEqual(self.create(self.today).status_code, 201)
+        self.assertEqual(self.create(self.today + timedelta(days=5)).status_code, 201)
+        self.assertEqual(self.create(self.event.event_date).status_code, 201)
+
+    def test_past_date_is_rejected(self):
+        response = self.create(self.today - timedelta(days=1))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["details"]["scheduled_date"],
+            ["La fecha objetivo no puede ser anterior a hoy."],
+        )
+
+    def test_date_after_event_is_rejected(self):
+        response = self.create(self.event.event_date + timedelta(days=1))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("posterior a la fecha del evento", response.json()["details"]["scheduled_date"][0])
+        self.assertFalse(LogisticSubtask.objects.exists())
+
+    def test_overdue_subtask_can_change_status_keeping_its_date(self):
+        overdue = LogisticSubtask.objects.create(
+            event=self.event, name="Vencida", scheduled_date=self.today - timedelta(days=3)
+        )
+        response = self.client.patch(
+            f"/api/subtasks/{overdue.id}/",
+            {"status": "done", "scheduled_date": overdue.scheduled_date.isoformat()},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_cannot_move_subtask_after_event_date(self):
+        subtask = LogisticSubtask.objects.create(
+            event=self.event, name="Gestión", scheduled_date=self.today
+        )
+        response = self.client.patch(
+            f"/api/subtasks/{subtask.id}/",
+            {"scheduled_date": (self.event.event_date + timedelta(days=2)).isoformat()},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)

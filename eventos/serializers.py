@@ -6,14 +6,23 @@ from decimal import Decimal
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import Event, LogisticSubtask, User
+
+# Formato único de fechas que ve el usuario (igual que en el frontend): DD/Mmm/AAAA, p. ej. 11/Sep/2026
+MONTHS_SHORT = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+
+
+def format_date(value):
+    return f"{value.day:02d}/{MONTHS_SHORT[value.month - 1]}/{value.year}"
 
 
 class LogisticSubtaskSerializer(serializers.ModelSerializer):
     """
     Serializador para operaciones sobre subtareas logísticas.
+    Al crear, la vista pasa el evento en el contexto (context={"event": evento}).
     """
 
     class Meta:
@@ -40,6 +49,28 @@ class LogisticSubtaskSerializer(serializers.ModelSerializer):
         if value is None or value <= Decimal("0"):
             raise serializers.ValidationError(
                 "Las horas estimadas deben ser un valor mayor a 0."
+            )
+        return value
+
+    def validate_scheduled_date(self, value):
+        """
+        La fecha objetivo debe estar entre hoy y la fecha del evento. Al editar se
+        permite conservar la fecha que ya tenía la gestión (p. ej. una vencida a la
+        que solo se le cambia el estado), pero no moverla fuera de ese rango.
+        """
+        if self.instance is not None and value == self.instance.scheduled_date:
+            return value
+
+        if value < timezone.localdate():
+            raise serializers.ValidationError(
+                "La fecha objetivo no puede ser anterior a hoy."
+            )
+
+        event = self.instance.event if self.instance is not None else self.context.get("event")
+        if event is not None and value > event.event_date:
+            raise serializers.ValidationError(
+                "La fecha objetivo no puede ser posterior a la fecha del evento "
+                f"({format_date(event.event_date)})."
             )
         return value
 
@@ -77,6 +108,18 @@ class EventSerializer(serializers.ModelSerializer):
                 "El nombre del evento no puede estar vacío."
             )
         return value.strip()
+
+    def validate_event_date(self, value):
+        """
+        No se pueden crear eventos en el pasado. Al editar, se permite conservar la
+        fecha que ya tenía el evento aunque haya pasado, pero no cambiarla por otra pasada.
+        """
+        unchanged = self.instance is not None and value == self.instance.event_date
+        if value < timezone.localdate() and not unchanged:
+            raise serializers.ValidationError(
+                "La fecha del evento no puede ser anterior a hoy."
+            )
+        return value
 
 
 class TodaySubtaskSerializer(serializers.ModelSerializer):
