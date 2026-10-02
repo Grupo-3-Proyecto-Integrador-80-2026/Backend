@@ -452,3 +452,66 @@ class DataIsolationTests(TestCase):
     def test_db_test_does_not_expose_usernames(self):
         content = self.client.get("/api/db-test/").content.decode()
         self.assertNotIn("organizador", content)
+
+
+class NoDemoUserTests(TestCase):
+    def setUp(self):
+        self.organizer = User.objects.create_user(
+            "elena", email="elena@eventos.com", password="Secreta123"
+        )
+        self.client.force_login(self.organizer)
+
+    def post(self, url, payload):
+        return self.client.post(url, payload, content_type="application/json")
+
+    def test_created_event_is_owned_by_authenticated_organizer(self):
+        response = self.post(
+            "/api/events/", {"name": "Boda", "event_date": "2026-12-01"}
+        )
+        self.assertEqual(response.status_code, 201)
+        event = Event.objects.get(id=response.json()["id"])
+        self.assertEqual(event.user, self.organizer)
+
+    def test_created_subtask_belongs_to_authenticated_organizers_event(self):
+        event = Event.objects.create(
+            user=self.organizer, name="Boda", event_date=timezone.localdate()
+        )
+        response = self.post(
+            f"/api/events/{event.id}/subtasks/",
+            {
+                "name": "Reservar salón",
+                "type": "book_venue",
+                "scheduled_date": "2026-12-01",
+                "estimated_hours": 2,
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        subtask = LogisticSubtask.objects.get(id=response.json()["id"])
+        self.assertEqual(subtask.event, event)
+        self.assertEqual(subtask.event.user, self.organizer)
+
+    def test_each_organizer_owns_what_they_create(self):
+        other = User.objects.create_user(
+            "marco", email="marco@eventos.com", password="Secreta123"
+        )
+        payload = {"name": "Evento", "event_date": "2026-12-01"}
+        first = self.post("/api/events/", payload).json()["id"]
+        self.client.force_login(other)
+        second = self.post("/api/events/", payload).json()["id"]
+        self.assertEqual(Event.objects.get(id=first).user, self.organizer)
+        self.assertEqual(Event.objects.get(id=second).user, other)
+
+    def test_demo_user_is_never_created_by_the_api(self):
+        self.client.get("/api/events/")
+        self.client.get("/api/today/")
+        self.post("/api/events/", {"name": "Boda", "event_date": "2026-12-01"})
+        self.assertFalse(User.objects.filter(username="demo_user").exists())
+
+    def test_anonymous_requests_create_nothing_and_no_demo_user(self):
+        self.client.logout()
+        response = self.post(
+            "/api/events/", {"name": "Boda", "event_date": "2026-12-01"}
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(Event.objects.count(), 0)
+        self.assertFalse(User.objects.filter(username="demo_user").exists())

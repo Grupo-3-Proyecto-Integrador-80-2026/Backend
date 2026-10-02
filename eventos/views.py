@@ -22,8 +22,6 @@ from .serializers import (
     TodayFilterSerializer,
     TodaySubtaskSerializer,
 )
-from .utils import resolve_request_user
-
 
 def health_check(request):
     """Verifica la disponibilidad básica del servicio."""
@@ -50,7 +48,7 @@ class EventListCreateAPIView(APIView):
         responses={200: EventSerializer(many=True)},
     )
     def get(self, request):
-        user = resolve_request_user(request)
+        user = request.user
         events = Event.objects.filter(user=user).prefetch_related("subtasks")
         serializer = EventSerializer(events, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -62,7 +60,7 @@ class EventListCreateAPIView(APIView):
         responses={201: EventSerializer, 400: dict},
     )
     def post(self, request):
-        user = resolve_request_user(request)
+        user = request.user
         serializer = EventSerializer(data=request.data)
 
         if serializer.is_valid():
@@ -82,7 +80,7 @@ class EventDetailAPIView(APIView):
     """Gestión individual de un evento (detalle, actualización, eliminación)."""
 
     def _get_event(self, request, event_id):
-        user = resolve_request_user(request)
+        user = request.user
         try:
             return Event.objects.get(id=event_id, user=user)
         except Event.DoesNotExist:
@@ -161,7 +159,7 @@ class EventSubtaskListCreateAPIView(APIView):
     """Gestión de subtareas logísticas asociadas a un evento."""
 
     def _get_event(self, request, event_id):
-        user = resolve_request_user(request)
+        user = request.user
         try:
             return Event.objects.get(id=event_id, user=user)
         except Event.DoesNotExist:
@@ -220,7 +218,7 @@ class SubtaskDetailAPIView(APIView):
     """Gestión individual de una subtarea (consultar, modificar o eliminar)."""
 
     def _get_subtask(self, request, subtask_id):
-        user = resolve_request_user(request)
+        user = request.user
         try:
             return LogisticSubtask.objects.get(id=subtask_id, event__user=user)
         except LogisticSubtask.DoesNotExist:
@@ -345,7 +343,7 @@ class TodayAPIView(APIView):
         responses={200: dict, 400: dict},
     )
     def get(self, request):
-        user = resolve_request_user(request)
+        user = request.user
         today = timezone.localdate()
 
         filters = TodayFilterSerializer(data=request.query_params)
