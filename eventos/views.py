@@ -4,7 +4,8 @@ Implementa endpoints para eventos y subtareas logísticas cumpliendo con US-01, 
 Documentado con Swagger / OpenAPI mediante drf-spectacular.
 """
 
-from django.contrib.auth import authenticate, login
+from django.contrib.auth import authenticate, login, logout
+from django.middleware.csrf import get_token
 from django.http import JsonResponse
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -19,6 +20,7 @@ from .serializers import (
     EventSerializer,
     LoginSerializer,
     LogisticSubtaskSerializer,
+    RegisterSerializer,
     TodayFilterSerializer,
     TodaySubtaskSerializer,
 )
@@ -424,6 +426,76 @@ class LoginAPIView(APIView):
             {
                 "message": "Inicio de sesión exitoso.",
                 "user": AuthUserSerializer(user).data,
+                "csrf_token": get_token(request),
             },
             status=status.HTTP_200_OK,
         )
+
+
+class RegisterAPIView(APIView):
+    """Registro de un organizador con nombre, apellido, correo y contraseña (US-11)."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Crear cuenta",
+        description="Registra al organizador y deja su sesión iniciada. "
+        "Responde con el usuario y el token CSRF para las siguientes peticiones.",
+        request=RegisterSerializer,
+        responses={201: dict, 400: dict},
+    )
+    def post(self, request):
+        serializer = RegisterSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "error": "Datos inválidos para crear la cuenta.",
+                    "details": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = serializer.save()
+        login(request, user)
+        return Response(
+            {
+                "message": "Cuenta creada exitosamente.",
+                "user": AuthUserSerializer(user).data,
+                "csrf_token": get_token(request),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class MeAPIView(APIView):
+    """Organizador de la sesión actual; el frontend lo usa al recargar la página."""
+
+    @extend_schema(
+        summary="Usuario actual",
+        description="Devuelve el organizador autenticado y el token CSRF vigente. "
+        "Responde 401 si no hay sesión.",
+        responses={200: dict, 401: dict},
+    )
+    def get(self, request):
+        return Response(
+            {
+                "user": AuthUserSerializer(request.user).data,
+                "csrf_token": get_token(request),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class LogoutAPIView(APIView):
+    """Cierra la sesión del organizador."""
+
+    @extend_schema(
+        summary="Cerrar sesión",
+        description="Termina la sesión actual. Requiere el encabezado X-CSRFToken.",
+        responses={200: dict, 401: dict},
+    )
+    def post(self, request):
+        logout(request)
+        return Response({"message": "Sesión cerrada."}, status=status.HTTP_200_OK)
+

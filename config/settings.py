@@ -135,6 +135,20 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
 ]
 
+# Sesión por cookie entre el frontend (Vercel) y la API (Render): el navegador
+# debe enviar la cookie en peticiones de otro origen y aceptar su token CSRF.
+CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
+
+if not DEBUG:
+    # En producción los dominios son distintos: las cookies deben ser SameSite=None
+    # (lo que exige Secure) y Render termina HTTPS en su proxy.
+    SESSION_COOKIE_SAMESITE = "None"
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SAMESITE = "None"
+    CSRF_COOKIE_SECURE = True
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STORAGES = {
     "staticfiles": {

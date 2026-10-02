@@ -26,14 +26,14 @@ Proyecto Integrador I (750018C, 2026-II), Universidad del Valle.
 
 ### Datos de ejemplo
 
-Para tener eventos y gestiones de prueba (vencidas, para hoy y próximas) en el usuario demo:
+Para tener eventos y gestiones de prueba (vencidas, para hoy y próximas) en tu cuenta (créala antes desde la app):
 
 ```
-python manage.py cargar_datos_demo           # solo si el usuario demo no tiene eventos
-python manage.py cargar_datos_demo --reset   # reemplaza los eventos del usuario demo
+python manage.py cargar_datos_demo --email tu@correo.com           # solo si la cuenta no tiene eventos
+python manage.py cargar_datos_demo --email tu@correo.com --reset   # reemplaza los eventos de esa cuenta
 ```
 
-Las fechas se calculan a partir del día en que se ejecuta. El comando solo modifica datos del usuario demo; revisa a qué base apunta tu `DATABASE_URL` antes de correrlo.
+Las fechas se calculan a partir del día en que se ejecuta. El comando solo modifica datos de la cuenta indicada; revisa a qué base apunta tu `DATABASE_URL` antes de correrlo.
 
 ## Endpoints
 

@@ -515,3 +515,118 @@ class NoDemoUserTests(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(Event.objects.count(), 0)
         self.assertFalse(User.objects.filter(username="demo_user").exists())
+
+class RegisterTests(TestCase):
+    URL = "/api/auth/register/"
+    VALID = {
+        "first_name": "Laura",
+        "last_name": "Gómez",
+        "email": "Laura@Eventos.com",
+        "password": "Organiza2026!",
+    }
+
+    def post(self, payload):
+        return self.client.post(self.URL, payload, content_type="application/json")
+
+    def test_register_creates_user_and_starts_session(self):
+        response = self.post(self.VALID)
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["user"]["email"], "laura@eventos.com")
+        self.assertEqual(body["user"]["first_name"], "Laura")
+        self.assertNotIn("password", body["user"])
+        self.assertIn("csrf_token", body)
+        user = User.objects.get(email="laura@eventos.com")
+        self.assertTrue(user.check_password("Organiza2026!"))
+        self.assertEqual(self.client.session["_auth_user_id"], str(user.pk))
+
+    def test_registered_user_can_log_in(self):
+        self.post(self.VALID)
+        self.client.logout()
+        response = self.client.post(
+            "/api/auth/login/",
+            {"email": "laura@eventos.com", "password": "Organiza2026!"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_duplicate_email_is_rejected_case_insensitive(self):
+        self.post(self.VALID)
+        self.client.logout()
+        response = self.post({**self.VALID, "email": "LAURA@eventos.com"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["details"]["email"], ["Ya existe una cuenta con este correo."]
+        )
+
+    def test_weak_password_is_rejected_in_spanish(self):
+        response = self.post({**self.VALID, "password": "123"})
+        self.assertEqual(response.status_code, 400)
+        messages = " ".join(response.json()["details"]["password"])
+        self.assertIn("contraseña", messages.lower())
+        self.assertFalse(User.objects.filter(email="laura@eventos.com").exists())
+
+    def test_missing_fields_are_rejected(self):
+        response = self.post({})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            set(response.json()["details"]),
+            {"first_name", "last_name", "email", "password"},
+        )
+
+
+class SessionEndpointsTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "elena@eventos.com", email="elena@eventos.com", password="Secreta123"
+        )
+
+    def test_me_requires_session(self):
+        response = self.client.get("/api/auth/me/")
+        self.assertEqual(response.status_code, 401)
+
+    def test_me_returns_user_and_csrf_token(self):
+        self.client.force_login(self.user)
+        response = self.client.get("/api/auth/me/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["user"]["email"], "elena@eventos.com")
+        self.assertTrue(response.json()["csrf_token"])
+
+    def test_logout_ends_session(self):
+        self.client.force_login(self.user)
+        response = self.client.post("/api/auth/logout/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get("/api/auth/me/").status_code, 401)
+
+
+class CsrfFlowTests(TestCase):
+    """Con sesión por cookie, las escrituras exigen el token que entrega el login."""
+
+    def setUp(self):
+        from django.test import Client
+
+        User.objects.create_user(
+            "elena@eventos.com", email="elena@eventos.com", password="Secreta123"
+        )
+        self.client = Client(enforce_csrf_checks=True)
+        login = self.client.post(
+            "/api/auth/login/",
+            {"email": "elena@eventos.com", "password": "Secreta123"},
+            content_type="application/json",
+        )
+        self.assertEqual(login.status_code, 200)
+        self.token = login.json()["csrf_token"]
+        self.event = {"name": "Boda", "event_date": "2026-12-01", "event_type": "wedding"}
+
+    def test_write_without_csrf_token_is_rejected(self):
+        response = self.client.post("/api/events/", self.event, content_type="application/json")
+        self.assertEqual(response.status_code, 403)
+
+    def test_write_with_login_csrf_token_succeeds(self):
+        response = self.client.post(
+            "/api/events/",
+            self.event,
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN=self.token,
+        )
+        self.assertEqual(response.status_code, 201)
