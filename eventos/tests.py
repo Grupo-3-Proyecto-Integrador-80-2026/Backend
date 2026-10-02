@@ -47,6 +47,7 @@ class TodayTieBreakTests(TestCase):
     def setUp(self):
         self.today = timezone.localdate()
         user = User.objects.create_user("demo_user", password="x")
+        self.client.force_login(user)
         self.event = Event.objects.create(
             user=user, name="Evento", event_date=self.today
         )
@@ -89,6 +90,7 @@ class FiltersPreserveGroupingAndOrderTests(TestCase):
     def setUp(self):
         self.today = timezone.localdate()
         user = User.objects.create_user("demo_user", password="x")
+        self.client.force_login(user)
         self.ev1 = Event.objects.create(
             user=user, name="Evento 1", event_date=self.today
         )
@@ -174,6 +176,10 @@ class FiltersPreserveGroupingAndOrderTests(TestCase):
 
 
 class TodayFilterValidationTests(TestCase):
+    def setUp(self):
+        user = User.objects.create_user("demo_user", password="x")
+        self.client.force_login(user)
+
     def get(self, query):
         return self.client.get(f"/api/today/{query}")
 
@@ -277,3 +283,65 @@ class LoginTests(TestCase):
 
     def test_get_is_not_allowed(self):
         self.assertEqual(self.client.get(self.URL).status_code, 405)
+
+
+class AuthRequiredTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "elena", email="elena@eventos.com", password="Secreta123"
+        )
+        today = timezone.localdate()
+        self.event = Event.objects.create(user=self.user, name="E", event_date=today)
+        self.subtask = LogisticSubtask.objects.create(
+            event=self.event, name="s", scheduled_date=today
+        )
+
+    def protected_endpoints(self):
+        e, s = self.event.id, self.subtask.id
+        return [
+            ("GET", "/api/events/"),
+            ("POST", "/api/events/"),
+            ("GET", f"/api/events/{e}/"),
+            ("PATCH", f"/api/events/{e}/"),
+            ("DELETE", f"/api/events/{e}/"),
+            ("GET", f"/api/events/{e}/subtasks/"),
+            ("POST", f"/api/events/{e}/subtasks/"),
+            ("GET", f"/api/subtasks/{s}/"),
+            ("PATCH", f"/api/subtasks/{s}/"),
+            ("DELETE", f"/api/subtasks/{s}/"),
+            ("GET", "/api/today/"),
+        ]
+
+    def request(self, method, url):
+        return self.client.generic(
+            method, url, data="{}", content_type="application/json"
+        )
+
+    def test_protected_endpoints_return_401_without_session(self):
+        for method, url in self.protected_endpoints():
+            with self.subTest(method=method, url=url):
+                self.assertEqual(self.request(method, url).status_code, 401)
+
+    def test_401_uses_standard_error_body(self):
+        response = self.request("GET", "/api/events/")
+        self.assertEqual(
+            response.json(),
+            {"error": "Debes iniciar sesión para acceder a este recurso."},
+        )
+
+    def test_unauthenticated_requests_change_nothing(self):
+        events, subtasks = Event.objects.count(), LogisticSubtask.objects.count()
+        for method, url in self.protected_endpoints():
+            self.request(method, url)
+        self.assertEqual(Event.objects.count(), events)
+        self.assertEqual(LogisticSubtask.objects.count(), subtasks)
+
+    def test_authenticated_user_can_access(self):
+        self.client.force_login(self.user)
+        self.assertEqual(self.client.get("/api/events/").status_code, 200)
+        self.assertEqual(self.client.get("/api/today/").status_code, 200)
+
+    def test_public_endpoints_stay_public(self):
+        self.assertEqual(self.client.get("/api/health/").status_code, 200)
+        # El login es accesible sin sesión: responde 400 por cuerpo vacío, no 401.
+        self.assertEqual(self.request("POST", "/api/auth/login/").status_code, 400)
