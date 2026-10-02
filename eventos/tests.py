@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from .models import Event, LogisticSubtask, User
 
+import json
 
 class OverdueConditionTests(TestCase):
     def setUp(self):
@@ -345,3 +346,109 @@ class AuthRequiredTests(TestCase):
         self.assertEqual(self.client.get("/api/health/").status_code, 200)
         # El login es accesible sin sesión: responde 400 por cuerpo vacío, no 401.
         self.assertEqual(self.request("POST", "/api/auth/login/").status_code, 400)
+
+
+class DataIsolationTests(TestCase):
+    def setUp(self):
+        today = timezone.localdate()
+        self.a = User.objects.create_user(
+            "organizador_a", email="a@eventos.com", password="x"
+        )
+        self.b = User.objects.create_user(
+            "organizador_b", email="b@eventos.com", password="x"
+        )
+        self.event_a = Event.objects.create(
+            user=self.a, name="Evento de A", event_date=today
+        )
+        self.subtask_a = LogisticSubtask.objects.create(
+            event=self.event_a,
+            name="Gestión de A",
+            scheduled_date=today - timedelta(days=1),
+        )
+        self.event_b = Event.objects.create(
+            user=self.b, name="Evento de B", event_date=today
+        )
+        self.subtask_b = LogisticSubtask.objects.create(
+            event=self.event_b, name="Gestión de B", scheduled_date=today
+        )
+        self.client.force_login(self.b)  # la sesión activa es la de B
+
+    def json(self, method, url, payload=None):
+        return self.client.generic(
+            method, url, data=json.dumps(payload or {}), content_type="application/json"
+        )
+
+    # --- Eventos ---
+    def test_each_user_sees_only_own_events(self):
+        for user, expected in ((self.a, "Evento de A"), (self.b, "Evento de B")):
+            self.client.force_login(user)
+            names = [e["name"] for e in self.client.get("/api/events/").json()]
+            self.assertEqual(names, [expected])
+
+    def test_cannot_read_foreign_event(self):
+        response = self.client.get(f"/api/events/{self.event_a.id}/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_cannot_modify_foreign_event(self):
+        response = self.json("PATCH", f"/api/events/{self.event_a.id}/", {"name": "x"})
+        self.assertEqual(response.status_code, 404)
+        self.event_a.refresh_from_db()
+        self.assertEqual(self.event_a.name, "Evento de A")
+
+    def test_cannot_delete_foreign_event(self):
+        response = self.json("DELETE", f"/api/events/{self.event_a.id}/")
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Event.objects.filter(id=self.event_a.id).exists())
+
+    def test_created_event_belongs_to_authenticated_user(self):
+        response = self.json(
+            "POST",
+            "/api/events/",
+            {"name": "Nuevo", "event_date": "2026-12-01", "user": self.a.id},
+        )
+        self.assertEqual(response.status_code, 201)
+        created = Event.objects.get(id=response.json()["id"])
+        self.assertEqual(created.user, self.b)  # el "user" enviado se ignora
+
+    # --- Gestiones ---
+    def test_cannot_list_or_create_subtasks_in_foreign_event(self):
+        url = f"/api/events/{self.event_a.id}/subtasks/"
+        self.assertEqual(self.client.get(url).status_code, 404)
+        response = self.json(
+            "POST",
+            url,
+            {"name": "intruso", "type": "other", "scheduled_date": "2026-12-01"},
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.event_a.subtasks.count(), 1)
+
+    def test_cannot_access_foreign_subtask(self):
+        url = f"/api/subtasks/{self.subtask_a.id}/"
+        self.assertEqual(self.client.get(url).status_code, 404)
+        self.assertEqual(self.json("PATCH", url, {"name": "x"}).status_code, 404)
+        self.assertEqual(self.json("DELETE", url).status_code, 404)
+        self.subtask_a.refresh_from_db()
+        self.assertEqual(self.subtask_a.name, "Gestión de A")
+
+    # --- Vista Hoy ---
+    def test_today_only_includes_own_subtasks(self):
+        data = self.client.get("/api/today/").json()
+        names = [t["name"] for g in ("overdue", "due_today", "upcoming") for t in data[g]]
+        self.assertEqual(names, ["Gestión de B"])
+        self.assertEqual(data["overdue"], [])  # la vencida de A no aparece
+
+    def test_today_filter_by_foreign_event_returns_nothing(self):
+        data = self.client.get(f"/api/today/?event={self.event_a.id}").json()
+        self.assertEqual(
+            (data["overdue"], data["due_today"], data["upcoming"]), ([], [], [])
+        )
+
+    # --- No revelar existencia ---
+    def test_foreign_resource_looks_like_nonexistent(self):
+        foreign = self.client.get(f"/api/events/{self.event_a.id}/")
+        missing = self.client.get("/api/events/999999/")
+        self.assertEqual(foreign.status_code, missing.status_code)
+
+    def test_db_test_does_not_expose_usernames(self):
+        content = self.client.get("/api/db-test/").content.decode()
+        self.assertNotIn("organizador", content)

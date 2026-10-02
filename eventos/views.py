@@ -31,15 +31,14 @@ def health_check(request):
 
 
 def db_test(request):
-    """Verifica conectividad con la base de datos."""
-    user = User.objects.first()
-    if user:
+    """Verifica conectividad con la base de datos (sin exponer datos de usuarios)."""
+    try:
+        User.objects.exists()
+    except Exception:
         return JsonResponse(
-            {"message": f"Conexión exitosa. Usuario encontrado: {user.username}"}
+            {"message": "No se pudo conectar con la base de datos."}, status=503
         )
-    return JsonResponse(
-        {"message": "Conectado a la BD, pero no existen usuarios registrados aún."}
-    )
+    return JsonResponse({"message": "Conexión exitosa con la base de datos."})
 
 
 class EventListCreateAPIView(APIView):
