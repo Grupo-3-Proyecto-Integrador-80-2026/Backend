@@ -145,6 +145,13 @@ STORAGES = {
 # Configuración de Django REST Framework y Swagger
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "eventos.authentication.SessionAuthentication401",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+    "EXCEPTION_HANDLER": "eventos.exceptions.api_exception_handler",
 }
 
 SPECTACULAR_SETTINGS = {

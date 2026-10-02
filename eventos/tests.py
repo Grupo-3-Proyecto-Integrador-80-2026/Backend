@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from .models import Event, LogisticSubtask, User
 
+import json
 
 class OverdueConditionTests(TestCase):
     def setUp(self):
@@ -47,6 +48,7 @@ class TodayTieBreakTests(TestCase):
     def setUp(self):
         self.today = timezone.localdate()
         user = User.objects.create_user("demo_user", password="x")
+        self.client.force_login(user)
         self.event = Event.objects.create(
             user=user, name="Evento", event_date=self.today
         )
@@ -89,6 +91,7 @@ class FiltersPreserveGroupingAndOrderTests(TestCase):
     def setUp(self):
         self.today = timezone.localdate()
         user = User.objects.create_user("demo_user", password="x")
+        self.client.force_login(user)
         self.ev1 = Event.objects.create(
             user=user, name="Evento 1", event_date=self.today
         )
@@ -174,6 +177,10 @@ class FiltersPreserveGroupingAndOrderTests(TestCase):
 
 
 class TodayFilterValidationTests(TestCase):
+    def setUp(self):
+        user = User.objects.create_user("demo_user", password="x")
+        self.client.force_login(user)
+
     def get(self, query):
         return self.client.get(f"/api/today/{query}")
 
@@ -214,3 +221,297 @@ class TodayFilterValidationTests(TestCase):
         self.assertEqual(
             (data["overdue"], data["due_today"], data["upcoming"]), ([], [], [])
         )
+
+
+class LoginTests(TestCase):
+    URL = "/api/auth/login/"
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "elena",
+            email="elena@eventos.com",
+            password="Secreta123",
+            first_name="Elena",
+            last_name="Morales",
+        )
+
+    def post(self, payload):
+        return self.client.post(self.URL, payload, content_type="application/json")
+
+    def test_login_success(self):
+        response = self.post({"email": "elena@eventos.com", "password": "Secreta123"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["user"]["email"], "elena@eventos.com")
+        self.assertNotIn("password", body["user"])
+        self.assertEqual(self.client.session["_auth_user_id"], str(self.user.pk))
+
+    def test_email_is_case_insensitive(self):
+        response = self.post({"email": "ELENA@eventos.com", "password": "Secreta123"})
+        self.assertEqual(response.status_code, 200)
+
+    def test_wrong_password_returns_generic_error(self):
+        response = self.post({"email": "elena@eventos.com", "password": "otra"})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {"error": "Credenciales inválidas"})
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_unknown_email_is_indistinguishable_from_wrong_password(self):
+        wrong_password = self.post({"email": "elena@eventos.com", "password": "otra"})
+        unknown_email = self.post({"email": "nadie@eventos.com", "password": "otra"})
+        self.assertEqual(wrong_password.status_code, unknown_email.status_code)
+        self.assertEqual(wrong_password.json(), unknown_email.json())
+
+    def test_inactive_user_gets_same_generic_error(self):
+        self.user.is_active = False
+        self.user.save()
+        response = self.post({"email": "elena@eventos.com", "password": "Secreta123"})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {"error": "Credenciales inválidas"})
+
+    def test_missing_fields_are_rejected(self):
+        response = self.post({})
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn("error", body)
+        self.assertIn("email", body["details"])
+        self.assertIn("password", body["details"])
+
+    def test_malformed_email_is_rejected(self):
+        response = self.post({"email": "no-es-un-correo", "password": "x"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("email", response.json()["details"])
+
+    def test_get_is_not_allowed(self):
+        self.assertEqual(self.client.get(self.URL).status_code, 405)
+
+
+class AuthRequiredTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "elena", email="elena@eventos.com", password="Secreta123"
+        )
+        today = timezone.localdate()
+        self.event = Event.objects.create(user=self.user, name="E", event_date=today)
+        self.subtask = LogisticSubtask.objects.create(
+            event=self.event, name="s", scheduled_date=today
+        )
+
+    def protected_endpoints(self):
+        e, s = self.event.id, self.subtask.id
+        return [
+            ("GET", "/api/events/"),
+            ("POST", "/api/events/"),
+            ("GET", f"/api/events/{e}/"),
+            ("PATCH", f"/api/events/{e}/"),
+            ("DELETE", f"/api/events/{e}/"),
+            ("GET", f"/api/events/{e}/subtasks/"),
+            ("POST", f"/api/events/{e}/subtasks/"),
+            ("GET", f"/api/subtasks/{s}/"),
+            ("PATCH", f"/api/subtasks/{s}/"),
+            ("DELETE", f"/api/subtasks/{s}/"),
+            ("GET", "/api/today/"),
+        ]
+
+    def request(self, method, url):
+        return self.client.generic(
+            method, url, data="{}", content_type="application/json"
+        )
+
+    def test_protected_endpoints_return_401_without_session(self):
+        for method, url in self.protected_endpoints():
+            with self.subTest(method=method, url=url):
+                self.assertEqual(self.request(method, url).status_code, 401)
+
+    def test_401_uses_standard_error_body(self):
+        response = self.request("GET", "/api/events/")
+        self.assertEqual(
+            response.json(),
+            {"error": "Debes iniciar sesión para acceder a este recurso."},
+        )
+
+    def test_unauthenticated_requests_change_nothing(self):
+        events, subtasks = Event.objects.count(), LogisticSubtask.objects.count()
+        for method, url in self.protected_endpoints():
+            self.request(method, url)
+        self.assertEqual(Event.objects.count(), events)
+        self.assertEqual(LogisticSubtask.objects.count(), subtasks)
+
+    def test_authenticated_user_can_access(self):
+        self.client.force_login(self.user)
+        self.assertEqual(self.client.get("/api/events/").status_code, 200)
+        self.assertEqual(self.client.get("/api/today/").status_code, 200)
+
+    def test_public_endpoints_stay_public(self):
+        self.assertEqual(self.client.get("/api/health/").status_code, 200)
+        # El login es accesible sin sesión: responde 400 por cuerpo vacío, no 401.
+        self.assertEqual(self.request("POST", "/api/auth/login/").status_code, 400)
+
+
+class DataIsolationTests(TestCase):
+    def setUp(self):
+        today = timezone.localdate()
+        self.a = User.objects.create_user(
+            "organizador_a", email="a@eventos.com", password="x"
+        )
+        self.b = User.objects.create_user(
+            "organizador_b", email="b@eventos.com", password="x"
+        )
+        self.event_a = Event.objects.create(
+            user=self.a, name="Evento de A", event_date=today
+        )
+        self.subtask_a = LogisticSubtask.objects.create(
+            event=self.event_a,
+            name="Gestión de A",
+            scheduled_date=today - timedelta(days=1),
+        )
+        self.event_b = Event.objects.create(
+            user=self.b, name="Evento de B", event_date=today
+        )
+        self.subtask_b = LogisticSubtask.objects.create(
+            event=self.event_b, name="Gestión de B", scheduled_date=today
+        )
+        self.client.force_login(self.b)  # la sesión activa es la de B
+
+    def json(self, method, url, payload=None):
+        return self.client.generic(
+            method, url, data=json.dumps(payload or {}), content_type="application/json"
+        )
+
+    # --- Eventos ---
+    def test_each_user_sees_only_own_events(self):
+        for user, expected in ((self.a, "Evento de A"), (self.b, "Evento de B")):
+            self.client.force_login(user)
+            names = [e["name"] for e in self.client.get("/api/events/").json()]
+            self.assertEqual(names, [expected])
+
+    def test_cannot_read_foreign_event(self):
+        response = self.client.get(f"/api/events/{self.event_a.id}/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_cannot_modify_foreign_event(self):
+        response = self.json("PATCH", f"/api/events/{self.event_a.id}/", {"name": "x"})
+        self.assertEqual(response.status_code, 404)
+        self.event_a.refresh_from_db()
+        self.assertEqual(self.event_a.name, "Evento de A")
+
+    def test_cannot_delete_foreign_event(self):
+        response = self.json("DELETE", f"/api/events/{self.event_a.id}/")
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Event.objects.filter(id=self.event_a.id).exists())
+
+    def test_created_event_belongs_to_authenticated_user(self):
+        response = self.json(
+            "POST",
+            "/api/events/",
+            {"name": "Nuevo", "event_date": "2026-12-01", "user": self.a.id},
+        )
+        self.assertEqual(response.status_code, 201)
+        created = Event.objects.get(id=response.json()["id"])
+        self.assertEqual(created.user, self.b)  # el "user" enviado se ignora
+
+    # --- Gestiones ---
+    def test_cannot_list_or_create_subtasks_in_foreign_event(self):
+        url = f"/api/events/{self.event_a.id}/subtasks/"
+        self.assertEqual(self.client.get(url).status_code, 404)
+        response = self.json(
+            "POST",
+            url,
+            {"name": "intruso", "type": "other", "scheduled_date": "2026-12-01"},
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.event_a.subtasks.count(), 1)
+
+    def test_cannot_access_foreign_subtask(self):
+        url = f"/api/subtasks/{self.subtask_a.id}/"
+        self.assertEqual(self.client.get(url).status_code, 404)
+        self.assertEqual(self.json("PATCH", url, {"name": "x"}).status_code, 404)
+        self.assertEqual(self.json("DELETE", url).status_code, 404)
+        self.subtask_a.refresh_from_db()
+        self.assertEqual(self.subtask_a.name, "Gestión de A")
+
+    # --- Vista Hoy ---
+    def test_today_only_includes_own_subtasks(self):
+        data = self.client.get("/api/today/").json()
+        names = [t["name"] for g in ("overdue", "due_today", "upcoming") for t in data[g]]
+        self.assertEqual(names, ["Gestión de B"])
+        self.assertEqual(data["overdue"], [])  # la vencida de A no aparece
+
+    def test_today_filter_by_foreign_event_returns_nothing(self):
+        data = self.client.get(f"/api/today/?event={self.event_a.id}").json()
+        self.assertEqual(
+            (data["overdue"], data["due_today"], data["upcoming"]), ([], [], [])
+        )
+
+    # --- No revelar existencia ---
+    def test_foreign_resource_looks_like_nonexistent(self):
+        foreign = self.client.get(f"/api/events/{self.event_a.id}/")
+        missing = self.client.get("/api/events/999999/")
+        self.assertEqual(foreign.status_code, missing.status_code)
+
+    def test_db_test_does_not_expose_usernames(self):
+        content = self.client.get("/api/db-test/").content.decode()
+        self.assertNotIn("organizador", content)
+
+
+class NoDemoUserTests(TestCase):
+    def setUp(self):
+        self.organizer = User.objects.create_user(
+            "elena", email="elena@eventos.com", password="Secreta123"
+        )
+        self.client.force_login(self.organizer)
+
+    def post(self, url, payload):
+        return self.client.post(url, payload, content_type="application/json")
+
+    def test_created_event_is_owned_by_authenticated_organizer(self):
+        response = self.post(
+            "/api/events/", {"name": "Boda", "event_date": "2026-12-01"}
+        )
+        self.assertEqual(response.status_code, 201)
+        event = Event.objects.get(id=response.json()["id"])
+        self.assertEqual(event.user, self.organizer)
+
+    def test_created_subtask_belongs_to_authenticated_organizers_event(self):
+        event = Event.objects.create(
+            user=self.organizer, name="Boda", event_date=timezone.localdate()
+        )
+        response = self.post(
+            f"/api/events/{event.id}/subtasks/",
+            {
+                "name": "Reservar salón",
+                "type": "book_venue",
+                "scheduled_date": "2026-12-01",
+                "estimated_hours": 2,
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        subtask = LogisticSubtask.objects.get(id=response.json()["id"])
+        self.assertEqual(subtask.event, event)
+        self.assertEqual(subtask.event.user, self.organizer)
+
+    def test_each_organizer_owns_what_they_create(self):
+        other = User.objects.create_user(
+            "marco", email="marco@eventos.com", password="Secreta123"
+        )
+        payload = {"name": "Evento", "event_date": "2026-12-01"}
+        first = self.post("/api/events/", payload).json()["id"]
+        self.client.force_login(other)
+        second = self.post("/api/events/", payload).json()["id"]
+        self.assertEqual(Event.objects.get(id=first).user, self.organizer)
+        self.assertEqual(Event.objects.get(id=second).user, other)
+
+    def test_demo_user_is_never_created_by_the_api(self):
+        self.client.get("/api/events/")
+        self.client.get("/api/today/")
+        self.post("/api/events/", {"name": "Boda", "event_date": "2026-12-01"})
+        self.assertFalse(User.objects.filter(username="demo_user").exists())
+
+    def test_anonymous_requests_create_nothing_and_no_demo_user(self):
+        self.client.logout()
+        response = self.post(
+            "/api/events/", {"name": "Boda", "event_date": "2026-12-01"}
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(Event.objects.count(), 0)
+        self.assertFalse(User.objects.filter(username="demo_user").exists())

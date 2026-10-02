@@ -19,11 +19,13 @@ from django.db import transaction
 from django.utils import timezone
 
 from eventos.models import Event, LogisticSubtask, User
-from eventos.utils import DEMO_EMAIL, DEMO_USERNAME
 
 Type = LogisticSubtask.TaskType
 Status = LogisticSubtask.Status
 Priority = LogisticSubtask.Priority
+
+DEMO_USERNAME = "demo_user"
+DEMO_EMAIL = "demo@eventos.com"
 
 # Cada gestión: (nombre, tipo, días respecto a hoy, horas, prioridad, estado, nota)
 DEMO_EVENTS = [

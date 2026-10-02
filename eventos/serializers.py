@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from .models import Event, LogisticSubtask
+from .models import Event, LogisticSubtask, User
 
 
 class LogisticSubtaskSerializer(serializers.ModelSerializer):
@@ -124,3 +124,39 @@ class TodayFilterSerializer(serializers.Serializer):
             ),
         },
     )
+
+
+class LoginSerializer(serializers.Serializer):
+    """Valida el cuerpo de POST /api/auth/login/ (US-11, PI-166)."""
+
+    email = serializers.EmailField(
+        error_messages={
+            "required": "El correo es obligatorio.",
+            "blank": "El correo es obligatorio.",
+            "invalid": "Ingresa un correo válido.",
+        }
+    )
+    password = serializers.CharField(
+        write_only=True,
+        trim_whitespace=False,
+        error_messages={
+            "required": "La contraseña es obligatoria.",
+            "blank": "La contraseña es obligatoria.",
+        },
+    )
+
+
+class AuthUserSerializer(serializers.ModelSerializer):
+    """Datos públicos del organizador autenticado (nunca incluye la contraseña)."""
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "email",
+            "first_name",
+            "last_name",
+            "daily_hours_limit",
+        ]
+        read_only_fields = fields

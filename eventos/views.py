@@ -4,22 +4,24 @@ Implementa endpoints para eventos y subtareas logísticas cumpliendo con US-01, 
 Documentado con Swagger / OpenAPI mediante drf-spectacular.
 """
 
+from django.contrib.auth import authenticate, login
 from django.http import JsonResponse
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import UPCOMING_WINDOW_DAYS, Event, LogisticSubtask, User
 from .serializers import (
+    AuthUserSerializer,
     EventSerializer,
+    LoginSerializer,
     LogisticSubtaskSerializer,
     TodayFilterSerializer,
     TodaySubtaskSerializer,
 )
-from .utils import resolve_request_user
-
 
 def health_check(request):
     """Verifica la disponibilidad básica del servicio."""
@@ -27,15 +29,14 @@ def health_check(request):
 
 
 def db_test(request):
-    """Verifica conectividad con la base de datos."""
-    user = User.objects.first()
-    if user:
+    """Verifica conectividad con la base de datos (sin exponer datos de usuarios)."""
+    try:
+        User.objects.exists()
+    except Exception:
         return JsonResponse(
-            {"message": f"Conexión exitosa. Usuario encontrado: {user.username}"}
+            {"message": "No se pudo conectar con la base de datos."}, status=503
         )
-    return JsonResponse(
-        {"message": "Conectado a la BD, pero no existen usuarios registrados aún."}
-    )
+    return JsonResponse({"message": "Conexión exitosa con la base de datos."})
 
 
 class EventListCreateAPIView(APIView):
@@ -47,7 +48,7 @@ class EventListCreateAPIView(APIView):
         responses={200: EventSerializer(many=True)},
     )
     def get(self, request):
-        user = resolve_request_user(request)
+        user = request.user
         events = Event.objects.filter(user=user).prefetch_related("subtasks")
         serializer = EventSerializer(events, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -59,7 +60,7 @@ class EventListCreateAPIView(APIView):
         responses={201: EventSerializer, 400: dict},
     )
     def post(self, request):
-        user = resolve_request_user(request)
+        user = request.user
         serializer = EventSerializer(data=request.data)
 
         if serializer.is_valid():
@@ -79,7 +80,7 @@ class EventDetailAPIView(APIView):
     """Gestión individual de un evento (detalle, actualización, eliminación)."""
 
     def _get_event(self, request, event_id):
-        user = resolve_request_user(request)
+        user = request.user
         try:
             return Event.objects.get(id=event_id, user=user)
         except Event.DoesNotExist:
@@ -158,7 +159,7 @@ class EventSubtaskListCreateAPIView(APIView):
     """Gestión de subtareas logísticas asociadas a un evento."""
 
     def _get_event(self, request, event_id):
-        user = resolve_request_user(request)
+        user = request.user
         try:
             return Event.objects.get(id=event_id, user=user)
         except Event.DoesNotExist:
@@ -217,7 +218,7 @@ class SubtaskDetailAPIView(APIView):
     """Gestión individual de una subtarea (consultar, modificar o eliminar)."""
 
     def _get_subtask(self, request, subtask_id):
-        user = resolve_request_user(request)
+        user = request.user
         try:
             return LogisticSubtask.objects.get(id=subtask_id, event__user=user)
         except LogisticSubtask.DoesNotExist:
@@ -342,7 +343,7 @@ class TodayAPIView(APIView):
         responses={200: dict, 400: dict},
     )
     def get(self, request):
-        user = resolve_request_user(request)
+        user = request.user
         today = timezone.localdate()
 
         filters = TodayFilterSerializer(data=request.query_params)
@@ -368,6 +369,61 @@ class TodayAPIView(APIView):
                 "overdue": TodaySubtaskSerializer(overdue, many=True).data,
                 "due_today": TodaySubtaskSerializer(due_today, many=True).data,
                 "upcoming": TodaySubtaskSerializer(upcoming, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+INVALID_CREDENTIALS_MESSAGE = "Credenciales inválidas"
+
+
+class LoginAPIView(APIView):
+    """Inicio de sesión local con correo y contraseña (US-11, PI-166)."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="Iniciar sesión",
+        description="Autentica al organizador con correo y contraseña e inicia su sesión. "
+        "Ante credenciales incorrectas responde siempre con el mismo mensaje genérico.",
+        request=LoginSerializer,
+        responses={200: dict, 400: dict, 401: dict},
+    )
+    def post(self, request):
+        serializer = LoginSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "error": "Datos inválidos para iniciar sesión.",
+                    "details": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        email = serializer.validated_data["email"]
+        password = serializer.validated_data["password"]
+
+        candidate = User.objects.filter(email__iexact=email).first()
+        user = None
+        if candidate is not None:
+            user = authenticate(request, username=candidate.username, password=password)
+        else:
+            # Gasta el mismo tiempo que una verificación real para no delatar
+            # si el correo existe.
+            User().set_password(password)
+
+        if user is None:
+            return Response(
+                {"error": INVALID_CREDENTIALS_MESSAGE},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        login(request, user)
+        return Response(
+            {
+                "message": "Inicio de sesión exitoso.",
+                "user": AuthUserSerializer(user).data,
             },
             status=status.HTTP_200_OK,
         )
