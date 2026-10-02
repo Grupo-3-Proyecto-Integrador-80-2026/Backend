@@ -34,4 +34,7 @@ urlpatterns = [
 
     # US-11: Autenticación
     path("auth/login/", views.LoginAPIView.as_view(), name="auth-login"),
+    path("auth/register/", views.RegisterAPIView.as_view(), name="auth-register"),
+    path("auth/me/", views.MeAPIView.as_view(), name="auth-me"),
+    path("auth/logout/", views.LogoutAPIView.as_view(), name="auth-logout"),
 ]

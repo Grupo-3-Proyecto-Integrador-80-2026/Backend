@@ -1,14 +1,15 @@
 """
-Carga eventos y gestiones logísticas de ejemplo para el usuario demo.
+Carga eventos y gestiones logísticas de ejemplo para un organizador.
 
 Las fechas se calculan relativas al día en que se ejecuta, de modo que la
 vista "Hoy" siempre tenga gestiones vencidas, para hoy y próximas.
 
 Uso:
-    python manage.py cargar_datos_demo           # solo si el demo no tiene eventos
-    python manage.py cargar_datos_demo --reset   # borra y recarga los eventos del demo
+    python manage.py cargar_datos_demo --email laura@correo.com           # a una cuenta existente
+    python manage.py cargar_datos_demo --email laura@correo.com --reset   # reemplaza sus eventos
+    python manage.py cargar_datos_demo                                     # al usuario demo (sin contraseña)
 
-Solo modifica datos del usuario demo; nunca toca eventos de otros usuarios.
+Solo modifica datos del organizador elegido; nunca toca eventos de otros usuarios.
 """
 
 from datetime import timedelta
@@ -111,28 +112,39 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
+            "--email",
+            help="Correo de una cuenta existente que recibirá los datos (por defecto, el usuario demo).",
+        )
+        parser.add_argument(
             "--reset",
             action="store_true",
-            help="Elimina los eventos actuales del usuario demo antes de cargar los de ejemplo.",
+            help="Elimina los eventos actuales del organizador antes de cargar los de ejemplo.",
         )
 
     @transaction.atomic
     def handle(self, *args, **options):
-        user, _ = User.objects.get_or_create(
-            username=DEMO_USERNAME,
-            defaults={"email": DEMO_EMAIL, "daily_hours_limit": 6, "first_name": "Usuario", "last_name": "Demo"},
-        )
+        if options["email"]:
+            user = User.objects.filter(email__iexact=options["email"]).first()
+            if user is None:
+                raise CommandError(
+                    f"No existe una cuenta con el correo {options['email']}. Créala primero desde la app."
+                )
+        else:
+            user, _ = User.objects.get_or_create(
+                username=DEMO_USERNAME,
+                defaults={"email": DEMO_EMAIL, "daily_hours_limit": 6, "first_name": "Usuario", "last_name": "Demo"},
+            )
 
         existing = Event.objects.filter(user=user)
         if existing.exists():
             if not options["reset"]:
                 raise CommandError(
-                    f"El usuario demo ya tiene {existing.count()} evento(s). "
+                    f"'{user.email}' ya tiene {existing.count()} evento(s). "
                     "Usa --reset para reemplazarlos por los datos de ejemplo."
                 )
             deleted = existing.count()
             existing.delete()
-            self.stdout.write(f"Eliminados {deleted} evento(s) previos del usuario demo.")
+            self.stdout.write(f"Eliminados {deleted} evento(s) previos de '{user.email}'.")
 
         today = timezone.localdate()
         total_subtasks = 0

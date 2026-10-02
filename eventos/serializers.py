@@ -4,6 +4,8 @@ Serializadores DRF para validación y transformación de datos en la API de even
 
 from decimal import Decimal
 
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from .models import Event, LogisticSubtask, User
@@ -160,3 +162,71 @@ class AuthUserSerializer(serializers.ModelSerializer):
             "daily_hours_limit",
         ]
         read_only_fields = fields
+
+
+class RegisterSerializer(serializers.Serializer):
+    """Valida el cuerpo de POST /api/auth/register/ (US-11)."""
+
+    first_name = serializers.CharField(
+        max_length=150,
+        error_messages={
+            "required": "El nombre es obligatorio.",
+            "blank": "El nombre es obligatorio.",
+            "max_length": "El nombre no puede superar los 150 caracteres.",
+        },
+    )
+    last_name = serializers.CharField(
+        max_length=150,
+        error_messages={
+            "required": "El apellido es obligatorio.",
+            "blank": "El apellido es obligatorio.",
+            "max_length": "El apellido no puede superar los 150 caracteres.",
+        },
+    )
+    email = serializers.EmailField(
+        max_length=150,
+        error_messages={
+            "required": "El correo es obligatorio.",
+            "blank": "El correo es obligatorio.",
+            "invalid": "Ingresa un correo válido.",
+            "max_length": "El correo no puede superar los 150 caracteres.",
+        },
+    )
+    password = serializers.CharField(
+        write_only=True,
+        trim_whitespace=False,
+        error_messages={
+            "required": "La contraseña es obligatoria.",
+            "blank": "La contraseña es obligatoria.",
+        },
+    )
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError("Ya existe una cuenta con este correo.")
+        return email
+
+    def validate(self, attrs):
+        # Las reglas de AUTH_PASSWORD_VALIDATORS (longitud, contraseñas comunes, etc.)
+        candidate = User(
+            username=attrs["email"],
+            email=attrs["email"],
+            first_name=attrs["first_name"],
+            last_name=attrs["last_name"],
+        )
+        try:
+            validate_password(attrs["password"], user=candidate)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"password": list(exc.messages)})
+        return attrs
+
+    def create(self, validated_data):
+        # El correo es el identificador de inicio de sesión; se usa también como username
+        return User.objects.create_user(
+            username=validated_data["email"],
+            email=validated_data["email"],
+            password=validated_data["password"],
+            first_name=validated_data["first_name"].strip(),
+            last_name=validated_data["last_name"].strip(),
+        )
