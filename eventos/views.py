@@ -5,6 +5,7 @@ Documentado con Swagger / OpenAPI mediante drf-spectacular.
 """
 
 from django.contrib.auth import authenticate, login, logout
+from django.db import transaction
 from django.middleware.csrf import get_token
 from django.http import JsonResponse
 from django.utils import timezone
@@ -299,14 +300,18 @@ class SubtaskDetailAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        conflict = self._overload_conflict(request.user, subtask, serializer.validated_data)
-        if conflict and not options.validated_data["confirm_overload"]:
-            return Response(
-                {"error": conflict["message"], "details": conflict},
-                status=status.HTTP_409_CONFLICT,
+        with transaction.atomic():
+            User.objects.select_for_update().get(pk=request.user.pk)
+            conflict = self._overload_conflict(
+                request.user, subtask, serializer.validated_data
             )
+            if conflict and not options.validated_data["confirm_overload"]:
+                return Response(
+                    {"error": conflict["message"], "details": conflict},
+                    status=status.HTTP_409_CONFLICT,
+                )
 
-        serializer.save()
+            serializer.save()
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def _overload_conflict(self, user, subtask, changes):
@@ -583,4 +588,3 @@ class LogoutAPIView(APIView):
     def post(self, request):
         logout(request)
         return Response({"message": "Sesión cerrada."}, status=status.HTTP_200_OK)
-
