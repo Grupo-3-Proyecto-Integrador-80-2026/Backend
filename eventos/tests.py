@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal
 
 from django.test import TestCase
 from django.utils import timezone
@@ -311,6 +312,8 @@ class AuthRequiredTests(TestCase):
             ("PATCH", f"/api/subtasks/{s}/"),
             ("DELETE", f"/api/subtasks/{s}/"),
             ("GET", "/api/today/"),
+            ("GET", "/api/settings/daily-limit/"),
+            ("PATCH", "/api/settings/daily-limit/"),
         ]
 
     def request(self, method, url):
@@ -742,3 +745,403 @@ class SubtaskDateRangeTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 400)
+
+
+class RescheduleSubtaskTests(TestCase):
+    """US-06: reprogramar la fecha objetivo por PATCH y verla reagrupada en /hoy."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "rosa@eventos.com", email="rosa@eventos.com", password="Secreta123"
+        )
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+        self.event = Event.objects.create(
+            user=self.user, name="Boda", event_date=self.today + timedelta(days=10)
+        )
+        self.subtask = LogisticSubtask.objects.create(
+            event=self.event,
+            name="Buscar proveedores",
+            scheduled_date=self.today - timedelta(days=2),
+            estimated_hours="2.0",
+        )
+
+    def patch(self, payload, subtask_id=None):
+        return self.client.patch(
+            f"/api/subtasks/{subtask_id or self.subtask.id}/",
+            payload,
+            content_type="application/json",
+        )
+
+    def group_of(self, subtask_id):
+        data = self.client.get("/api/today/").json()
+        for group in ("overdue", "due_today", "upcoming"):
+            if subtask_id in [t["id"] for t in data[group]]:
+                return group
+        return None
+
+    def test_reschedule_to_today_moves_to_due_today(self):
+        self.assertEqual(self.group_of(self.subtask.id), "overdue")
+        response = self.patch({"scheduled_date": self.today.isoformat()})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["scheduled_date"], self.today.isoformat())
+        self.assertEqual(self.group_of(self.subtask.id), "due_today")
+
+    def test_reschedule_to_future_moves_to_upcoming(self):
+        target = self.today + timedelta(days=3)
+        self.assertEqual(self.patch({"scheduled_date": target.isoformat()}).status_code, 200)
+        self.assertEqual(self.group_of(self.subtask.id), "upcoming")
+
+    def test_reschedule_persists(self):
+        target = self.today + timedelta(days=3)
+        self.patch({"scheduled_date": target.isoformat()})
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.scheduled_date, target)
+
+    def test_invalid_date_format_returns_standard_error(self):
+        response = self.patch({"scheduled_date": "31-02-2026"})
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn("error", body)
+        self.assertIn("scheduled_date", body["details"])
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.scheduled_date, self.today - timedelta(days=2))
+
+    def test_empty_date_is_rejected(self):
+        response = self.patch({"scheduled_date": None})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("scheduled_date", response.json()["details"])
+
+    def test_past_date_is_rejected(self):
+        response = self.patch({"scheduled_date": (self.today - timedelta(days=1)).isoformat()})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["details"]["scheduled_date"],
+            ["La fecha objetivo no puede ser anterior a hoy."],
+        )
+
+    def test_nonexistent_subtask_returns_standard_404(self):
+        response = self.patch({"scheduled_date": self.today.isoformat()}, subtask_id=99999)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(set(response.json()), {"error"})
+
+
+class DailyOverloadConflictTests(TestCase):
+    """US-07: conflicto cuando la carga del día destino supera el límite diario."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "rosa@eventos.com", email="rosa@eventos.com", password="Secreta123"
+        )
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+        self.day_x = self.today + timedelta(days=2)
+        self.event = Event.objects.create(
+            user=self.user, name="Boda", event_date=self.today + timedelta(days=10)
+        )
+        self.subtask = LogisticSubtask.objects.create(
+            event=self.event,
+            name="Buscar proveedores",
+            scheduled_date=self.today,
+            estimated_hours="2.0",
+        )
+
+    def plan(self, day, hours, status="pending", event=None):
+        return LogisticSubtask.objects.create(
+            event=event or self.event,
+            name="Planificada",
+            scheduled_date=day,
+            estimated_hours=hours,
+            status=status,
+        )
+
+    def move(self, day, **extra):
+        return self.client.patch(
+            f"/api/subtasks/{self.subtask.id}/",
+            {"scheduled_date": day.isoformat(), **extra},
+            content_type="application/json",
+        )
+
+    def test_conflict_returns_409_with_date_hours_and_limit(self):
+        self.plan(self.day_x, "3.0")
+        self.plan(self.day_x, "2.0")
+        response = self.move(self.day_x)
+        self.assertEqual(response.status_code, 409)
+        body = response.json()
+        self.assertEqual(body["error"], "Quedarías con 7h de gestión planificadas (límite 6h).")
+        details = body["details"]
+        self.assertEqual(details["conflict"], "daily_overload")
+        self.assertEqual(details["date"], self.day_x.isoformat())
+        self.assertEqual(details["planned_hours"], 5.0)
+        self.assertEqual(details["resulting_hours"], 7.0)
+        self.assertEqual(details["limit_hours"], 6)
+        self.assertEqual(
+            [o["action"] for o in details["options"]], ["move", "reduce_hours", "postpone"]
+        )
+
+    def test_conflict_does_not_save(self):
+        self.plan(self.day_x, "5.0")
+        self.move(self.day_x)
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.scheduled_date, self.today)
+
+    def test_no_conflict_saves(self):
+        self.plan(self.day_x, "3.0")
+        self.assertEqual(self.move(self.day_x).status_code, 200)
+
+    def test_reaching_exactly_the_limit_is_not_a_conflict(self):
+        self.plan(self.day_x, "4.0")
+        self.assertEqual(self.move(self.day_x).status_code, 200)
+
+    def test_confirmed_overload_is_saved(self):
+        self.plan(self.day_x, "5.0")
+        response = self.move(self.day_x, confirm_overload=True)
+        self.assertEqual(response.status_code, 200)
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.scheduled_date, self.day_x)
+
+    def test_done_and_postponed_subtasks_do_not_count(self):
+        self.plan(self.day_x, "5.0", status="done")
+        self.plan(self.day_x, "5.0", status="postponed")
+        self.assertEqual(self.move(self.day_x).status_code, 200)
+
+    def test_in_progress_subtasks_count(self):
+        self.plan(self.day_x, "5.0", status="in_progress")
+        self.assertEqual(self.move(self.day_x).status_code, 409)
+
+    def test_load_includes_all_events_of_the_organizer(self):
+        other_event = Event.objects.create(
+            user=self.user, name="Cumpleaños", event_date=self.today + timedelta(days=10)
+        )
+        self.plan(self.day_x, "5.0", event=other_event)
+        self.assertEqual(self.move(self.day_x).status_code, 409)
+
+    def test_other_organizers_load_does_not_count(self):
+        other = User.objects.create_user("otra", password="x")
+        other_event = Event.objects.create(
+            user=other, name="Ajeno", event_date=self.today + timedelta(days=10)
+        )
+        self.plan(self.day_x, "5.0", event=other_event)
+        self.assertEqual(self.move(self.day_x).status_code, 200)
+
+    def test_increasing_hours_on_same_day_detects_conflict(self):
+        self.plan(self.today, "4.0")
+        response = self.client.patch(
+            f"/api/subtasks/{self.subtask.id}/",
+            {"estimated_hours": 3},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["details"]["resulting_hours"], 7.0)
+
+    def test_editing_other_fields_does_not_evaluate_conflict(self):
+        self.plan(self.today, "6.0")  # el día ya estaba sobrecargado
+        response = self.client.patch(
+            f"/api/subtasks/{self.subtask.id}/",
+            {
+                "name": "Buscar proveedores de flores",
+                "scheduled_date": self.today.isoformat(),
+                "estimated_hours": "2.0",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_postponing_is_never_a_conflict(self):
+        self.plan(self.day_x, "5.0")
+        response = self.move(self.day_x, status="postponed")
+        self.assertEqual(response.status_code, 200)
+
+    def test_invalid_confirm_flag_is_rejected(self):
+        response = self.move(self.day_x, confirm_overload="quizás")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("confirm_overload", response.json()["details"])
+
+
+class ResolveOverloadConflictTests(TestCase):
+    """US-08: días sugeridos, recálculo al mover o reducir horas y validación de horas."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "rosa@eventos.com", email="rosa@eventos.com", password="Secreta123"
+        )
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+        self.day_x = self.today + timedelta(days=2)
+        self.event = Event.objects.create(
+            user=self.user, name="Boda", event_date=self.today + timedelta(days=4)
+        )
+        self.subtask = LogisticSubtask.objects.create(
+            event=self.event,
+            name="Buscar proveedores",
+            scheduled_date=self.day_x,
+            estimated_hours="3.0",
+        )
+
+    def plan(self, day, hours):
+        LogisticSubtask.objects.create(
+            event=self.event, name="Planificada", scheduled_date=day, estimated_hours=hours
+        )
+
+    def patch(self, payload):
+        return self.client.patch(
+            f"/api/subtasks/{self.subtask.id}/", payload, content_type="application/json"
+        )
+
+    def test_suggested_dates_fit_within_limit_and_event(self):
+        self.subtask.scheduled_date = self.today
+        self.subtask.save()
+        self.plan(self.day_x, "5.0")
+        self.plan(self.today + timedelta(days=3), "4.0")  # no cabe: 4 + 3 > 6
+        response = self.patch({"scheduled_date": self.day_x.isoformat()})
+        self.assertEqual(response.status_code, 409)
+        suggested = response.json()["details"]["suggested_dates"]
+        self.assertNotIn(self.day_x.isoformat(), suggested)
+        self.assertNotIn((self.today + timedelta(days=3)).isoformat(), suggested)
+        self.assertEqual(
+            suggested,
+            sorted(
+                [
+                    (self.today + timedelta(days=1)).isoformat(),
+                    (self.today + timedelta(days=4)).isoformat(),
+                    self.today.isoformat(),
+                ]
+            ),
+        )
+
+    def test_moving_to_suggested_day_resolves_conflict(self):
+        self.subtask.scheduled_date = self.today
+        self.subtask.save()
+        self.plan(self.day_x, "5.0")
+        suggested = self.patch({"scheduled_date": self.day_x.isoformat()}).json()["details"][
+            "suggested_dates"
+        ]
+        response = self.patch({"scheduled_date": suggested[0]})
+        self.assertEqual(response.status_code, 200)
+
+    def test_reducing_hours_resolves_conflict(self):
+        self.subtask.status = "postponed"
+        self.subtask.save()
+        self.plan(self.day_x, "5.0")
+        # Al reactivarla se detecta: 5 + 3 = 8 > 6
+        self.assertEqual(self.patch({"status": "pending"}).status_code, 409)
+        response = self.patch(
+            {"status": "pending", "estimated_hours": 1, "resolution": "reduce_hours"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.estimated_hours, Decimal("1.0"))
+
+    def test_insufficient_reduction_keeps_conflict_with_new_figures(self):
+        self.plan(self.day_x, "5.0")
+        response = self.patch({"estimated_hours": 2, "resolution": "reduce_hours"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"], "Quedarías con 7h de gestión planificadas (límite 6h)."
+        )
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.estimated_hours, Decimal("3.0"))
+
+    def test_reduced_hours_must_be_less_than_current(self):
+        for hours in (3, 4):
+            response = self.patch({"estimated_hours": hours, "resolution": "reduce_hours"})
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("menores que las estimadas actualmente (3h)",
+                          response.json()["details"]["estimated_hours"][0])
+
+    def test_reduced_hours_must_be_greater_than_zero(self):
+        for hours in (0, -1):
+            response = self.patch({"estimated_hours": hours, "resolution": "reduce_hours"})
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("estimated_hours", response.json()["details"])
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.estimated_hours, Decimal("3.0"))
+
+    def test_reduce_hours_requires_hours(self):
+        response = self.patch({"resolution": "reduce_hours"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("estimated_hours", response.json()["details"])
+
+    def test_unknown_resolution_is_rejected(self):
+        response = self.patch({"resolution": "magia"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("resolution", response.json()["details"])
+
+
+class DailyLimitSettingsTests(TestCase):
+    """US-12: GET y PATCH /api/settings/daily-limit/ y su uso en la detección."""
+
+    URL = "/api/settings/daily-limit/"
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "rosa@eventos.com", email="rosa@eventos.com", password="Secreta123"
+        )
+        self.client.force_login(self.user)
+
+    def patch(self, payload):
+        return self.client.patch(self.URL, payload, content_type="application/json")
+
+    def test_default_limit_is_6(self):
+        response = self.client.get(self.URL)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"daily_hours_limit": 6})
+
+    def test_update_valid_limit(self):
+        response = self.patch({"daily_hours_limit": 4})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"daily_hours_limit": 4})
+        self.assertEqual(self.client.get(self.URL).json()["daily_hours_limit"], 4)
+
+    def test_range_bounds_are_allowed(self):
+        for value in (1, 16):
+            self.assertEqual(self.patch({"daily_hours_limit": value}).status_code, 200)
+
+    def test_out_of_range_values_are_rejected_with_range_message(self):
+        for value in (0, 17, -3, 4.5, "abc"):
+            response = self.patch({"daily_hours_limit": value})
+            self.assertEqual(response.status_code, 400, value)
+            body = response.json()
+            self.assertIn("error", body)
+            self.assertIn("entre 1 y 16", body["details"]["daily_hours_limit"][0])
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.daily_hours_limit, 6)
+
+    def test_missing_value_is_rejected(self):
+        response = self.patch({})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["details"]["daily_hours_limit"], ["El límite diario es obligatorio."]
+        )
+
+    def test_limit_is_per_organizer(self):
+        other = User.objects.create_user("b@eventos.com", email="b@eventos.com", password="x")
+        other.daily_hours_limit = 4
+        other.save()
+        self.assertEqual(self.client.get(self.URL).json()["daily_hours_limit"], 6)
+        self.client.force_login(other)
+        self.assertEqual(self.client.get(self.URL).json()["daily_hours_limit"], 4)
+
+    def test_conflict_detection_uses_the_new_limit(self):
+        today = timezone.localdate()
+        event = Event.objects.create(
+            user=self.user, name="Boda", event_date=today + timedelta(days=5)
+        )
+        LogisticSubtask.objects.create(
+            event=event, name="Planificada", scheduled_date=today + timedelta(days=1),
+            estimated_hours="3.0",
+        )
+        subtask = LogisticSubtask.objects.create(
+            event=event, name="Mover", scheduled_date=today, estimated_hours="2.0"
+        )
+        move = lambda: self.client.patch(  # noqa: E731
+            f"/api/subtasks/{subtask.id}/",
+            {"scheduled_date": (today + timedelta(days=1)).isoformat()},
+            content_type="application/json",
+        )
+        self.patch({"daily_hours_limit": 4})
+        response = move()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["error"], "Quedarías con 5h de gestión planificadas (límite 4h)."
+        )

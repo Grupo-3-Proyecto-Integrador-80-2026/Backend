@@ -12,11 +12,15 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import AbstractUser
-from django.core.validators import MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
 UPCOMING_WINDOW_DAYS = 7
+
+DAILY_LIMIT_DEFAULT = 6
+DAILY_LIMIT_MIN = 1
+DAILY_LIMIT_MAX = 16
 
 
 class User(AbstractUser):
@@ -26,7 +30,11 @@ class User(AbstractUser):
     """
 
     daily_hours_limit = models.PositiveIntegerField(
-        default=6,
+        default=DAILY_LIMIT_DEFAULT,
+        validators=[
+            MinValueValidator(DAILY_LIMIT_MIN),
+            MaxValueValidator(DAILY_LIMIT_MAX),
+        ],
         help_text="Límite de horas diarias que el usuario puede dedicar a gestiones logísticas.",
     )
 

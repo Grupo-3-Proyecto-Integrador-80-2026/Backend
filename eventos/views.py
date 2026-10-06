@@ -17,13 +17,16 @@ from rest_framework.views import APIView
 from .models import UPCOMING_WINDOW_DAYS, Event, LogisticSubtask, User
 from .serializers import (
     AuthUserSerializer,
+    DailyLimitSerializer,
     EventSerializer,
     LoginSerializer,
     LogisticSubtaskSerializer,
     RegisterSerializer,
+    SubtaskUpdateOptionsSerializer,
     TodayFilterSerializer,
     TodaySubtaskSerializer,
 )
+from .workload import ACTIVE_STATUSES, detect_overload
 
 def health_check(request):
     """Verifica la disponibilidad básica del servicio."""
@@ -246,9 +249,12 @@ class SubtaskDetailAPIView(APIView):
 
     @extend_schema(
         summary="Actualizar parcialmente una subtarea",
-        description="Permite reprogramar fechas, actualizar estado (hecho/pospuesto), horas estimadas o notas.",
+        description="Permite reprogramar fechas, actualizar estado (hecho/pospuesto), horas estimadas o notas. "
+        "Si el cambio deja el día por encima del límite diario del organizador responde 409 con la fecha, "
+        "las horas resultantes, el límite y días sugeridos; se guarda igual enviando confirm_overload=true. "
+        "Con resolution=reduce_hours las nuevas horas deben ser menores que las actuales.",
         request=LogisticSubtaskSerializer,
-        responses={200: LogisticSubtaskSerializer, 400: dict, 404: dict},
+        responses={200: LogisticSubtaskSerializer, 400: dict, 404: dict, 409: dict},
     )
     def patch(self, request, subtask_id):
         subtask = self._get_subtask(request, subtask_id)
@@ -262,19 +268,65 @@ class SubtaskDetailAPIView(APIView):
 
         payload = request.data.copy()
         payload.pop("event", None)
-
-        serializer = LogisticSubtaskSerializer(subtask, data=payload, partial=True)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
-
-        return Response(
-            {
-                "error": "Error de validación al actualizar la subtarea.",
-                "details": serializer.errors,
-            },
-            status=status.HTTP_400_BAD_REQUEST,
+        options = SubtaskUpdateOptionsSerializer(
+            data={
+                key: payload.pop(key)
+                for key in ("confirm_overload", "resolution")
+                if key in payload
+            }
         )
+        if not options.is_valid():
+            return Response(
+                {
+                    "error": "Error de validación al actualizar la subtarea.",
+                    "details": options.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = LogisticSubtaskSerializer(
+            subtask,
+            data=payload,
+            partial=True,
+            context={"resolution": options.validated_data.get("resolution")},
+        )
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "error": "Error de validación al actualizar la subtarea.",
+                    "details": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        conflict = self._overload_conflict(request.user, subtask, serializer.validated_data)
+        if conflict and not options.validated_data["confirm_overload"]:
+            return Response(
+                {"error": conflict["message"], "details": conflict},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def _overload_conflict(self, user, subtask, changes):
+        """
+        Conflicto de sobrecarga (US-07) si el cambio mueve la gestión de día, cambia
+        sus horas o la reactiva; editar solo nombre, nota, etc. no lo evalúa.
+        """
+        day = changes.get("scheduled_date", subtask.scheduled_date)
+        hours = changes.get("estimated_hours", subtask.estimated_hours)
+        new_status = changes.get("status", subtask.status)
+
+        if new_status not in ACTIVE_STATUSES:
+            return None
+        if (
+            day == subtask.scheduled_date
+            and hours == subtask.estimated_hours
+            and subtask.status in ACTIVE_STATUSES
+        ):
+            return None
+        return detect_overload(user, subtask, day, hours)
 
     @extend_schema(
         summary="Eliminar una subtarea",
@@ -374,6 +426,39 @@ class TodayAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class DailyLimitAPIView(APIView):
+    """Límite diario de horas de gestión del organizador autenticado (US-12)."""
+
+    @extend_schema(
+        summary="Consultar límite diario",
+        description="Devuelve el límite de horas de gestión por día del organizador (6 h por defecto).",
+        responses={200: DailyLimitSerializer, 401: dict},
+    )
+    def get(self, request):
+        return Response(DailyLimitSerializer(request.user).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Actualizar límite diario",
+        description="Guarda el límite de horas de gestión por día (entero entre 1 y 16). "
+        "La detección de sobrecarga usa este valor desde ese momento.",
+        request=DailyLimitSerializer,
+        responses={200: DailyLimitSerializer, 400: dict, 401: dict},
+    )
+    def patch(self, request):
+        serializer = DailyLimitSerializer(request.user, data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "error": "No se pudo guardar el límite diario.",
+                    "details": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 INVALID_CREDENTIALS_MESSAGE = "Credenciales inválidas"
