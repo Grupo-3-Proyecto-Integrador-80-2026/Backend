@@ -9,7 +9,14 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Event, LogisticSubtask, User
+from .models import (
+    DAILY_LIMIT_MAX,
+    DAILY_LIMIT_MIN,
+    Event,
+    LogisticSubtask,
+    User,
+)
+from .workload import format_hours
 
 # Formato único de fechas que ve el usuario (igual que en el frontend): DD/Mmm/AAAA, p. ej. 11/Sep/2026
 MONTHS_SHORT = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
@@ -73,6 +80,79 @@ class LogisticSubtaskSerializer(serializers.ModelSerializer):
                 f"({format_date(event.event_date)})."
             )
         return value
+
+    def validate(self, attrs):
+        """
+        Al resolver un conflicto reduciendo horas (US-08), las nuevas horas deben
+        ser mayores que cero y menores que las que la gestión tenía estimadas.
+        """
+        if self.context.get("resolution") != SubtaskUpdateOptionsSerializer.REDUCE_HOURS:
+            return attrs
+
+        hours = attrs.get("estimated_hours")
+        if hours is None:
+            raise serializers.ValidationError(
+                {"estimated_hours": ["Indica las nuevas horas estimadas de la gestión."]}
+            )
+        current = self.instance.estimated_hours
+        if hours >= current:
+            raise serializers.ValidationError(
+                {
+                    "estimated_hours": [
+                        "Las horas reducidas deben ser mayores que 0 y menores que "
+                        f"las estimadas actualmente ({format_hours(current)}h)."
+                    ]
+                }
+            )
+        return attrs
+
+
+class SubtaskUpdateOptionsSerializer(serializers.Serializer):
+    """
+    Campos de control opcionales de PATCH /api/subtasks/:id/ (US-07, US-08).
+    No se guardan en la gestión; indican cómo tratar el conflicto de sobrecarga.
+    """
+
+    REDUCE_HOURS = "reduce_hours"
+
+    confirm_overload = serializers.BooleanField(
+        required=False,
+        default=False,
+        error_messages={"invalid": "El campo 'confirm_overload' debe ser verdadero o falso."},
+    )
+    resolution = serializers.ChoiceField(
+        choices=[REDUCE_HOURS],
+        required=False,
+        error_messages={
+            "invalid_choice": f"La resolución '{{input}}' no es válida. Valor permitido: {REDUCE_HOURS}."
+        },
+    )
+
+
+class DailyLimitSerializer(serializers.ModelSerializer):
+    """Límite diario de horas de gestión del organizador (US-12)."""
+
+    _RANGE_MESSAGE = (
+        f"El límite diario debe ser un número entero de horas entre "
+        f"{DAILY_LIMIT_MIN} y {DAILY_LIMIT_MAX}."
+    )
+
+    daily_hours_limit = serializers.IntegerField(
+        min_value=DAILY_LIMIT_MIN,
+        max_value=DAILY_LIMIT_MAX,
+        error_messages={
+            "required": "El límite diario es obligatorio.",
+            "null": "El límite diario es obligatorio.",
+            "invalid": _RANGE_MESSAGE,
+            "min_value": _RANGE_MESSAGE,
+            "max_value": _RANGE_MESSAGE,
+            "max_string_length": _RANGE_MESSAGE,
+        },
+    )
+
+    class Meta:
+        model = User
+        fields = ["daily_hours_limit"]
 
 
 class EventSerializer(serializers.ModelSerializer):

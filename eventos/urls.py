@@ -31,6 +31,12 @@ urlpatterns = [
     ),
     # US-04: Vista Hoy
     path("today/", views.TodayAPIView.as_view(), name="today"),
+    # US-12: Límite diario de horas de gestión
+    path(
+        "settings/daily-limit/",
+        views.DailyLimitAPIView.as_view(),
+        name="settings-daily-limit",
+    ),
 
     # US-11: Autenticación
     path("auth/login/", views.LoginAPIView.as_view(), name="auth-login"),
