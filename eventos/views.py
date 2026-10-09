@@ -4,6 +4,7 @@ Implementa endpoints para eventos y subtareas logísticas cumpliendo con US-01, 
 Documentado con Swagger / OpenAPI mediante drf-spectacular.
 """
 
+from decimal import Decimal
 from django.contrib.auth import authenticate, login, logout
 from django.db import transaction
 from django.middleware.csrf import get_token
@@ -192,9 +193,12 @@ class EventSubtaskListCreateAPIView(APIView):
 
     @extend_schema(
         summary="Crear una subtarea en un evento",
-        description="Crea una gestión logística dentro del evento indicado.",
+        description="Crea una gestión logística dentro del evento indicado. "
+        "Si la gestión deja ese día por encima del límite diario del organizador responde 409 "
+        "con la fecha, las horas resultantes, el límite y días sugeridos; se crea igual "
+        "enviando confirm_overload=true.",
         request=LogisticSubtaskSerializer,
-        responses={201: LogisticSubtaskSerializer, 400: dict, 404: dict},
+        responses={201: LogisticSubtaskSerializer, 400: dict, 404: dict, 409: dict},
     )
     def post(self, request, event_id):
         event = self._get_event(request, event_id)
@@ -206,17 +210,54 @@ class EventSubtaskListCreateAPIView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        serializer = LogisticSubtaskSerializer(data=request.data, context={"event": event})
-        if serializer.is_valid():
-            serializer.save(event=event)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        # Campo de control (no se guarda): permite crear aunque haya sobrecarga
+        payload = request.data.copy()
+        options = SubtaskUpdateOptionsSerializer(
+            data={key: payload.pop(key) for key in ("confirm_overload",) if key in payload}
+        )
+        if not options.is_valid():
+            return Response(
+                {
+                    "error": "Datos inválidos para la subtarea logística.",
+                    "details": options.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        return Response(
-            {
-                "error": "Datos inválidos para la subtarea logística.",
-                "details": serializer.errors,
-            },
-            status=status.HTTP_400_BAD_REQUEST,
+        serializer = LogisticSubtaskSerializer(data=payload, context={"event": event})
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "error": "Datos inválidos para la subtarea logística.",
+                    "details": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            User.objects.select_for_update().get(pk=request.user.pk)
+            conflict = self._overload_conflict(
+                request.user, event, serializer.validated_data
+            )
+            if conflict and not options.validated_data["confirm_overload"]:
+                return Response(
+                    {"error": conflict["message"], "details": conflict},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            serializer.save(event=event)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def _overload_conflict(self, user, event, data):
+        """Conflicto de sobrecarga (US-07) si la gestión nueva deja su día sobre el límite."""
+        if data.get("status", LogisticSubtask.Status.PENDING) not in ACTIVE_STATUSES:
+            return None
+        draft = LogisticSubtask(event=event)  # sin guardar: no excluye ninguna gestión
+        return detect_overload(
+            user,
+            draft,
+            data["scheduled_date"],
+            data.get("estimated_hours", Decimal("1.0")),  # default del modelo
         )
 
 

@@ -47,8 +47,8 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-    "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -133,6 +133,7 @@ AUTH_USER_MODEL = "eventos.User"
 CORS_ALLOWED_ORIGINS = [
     "https://frontend-zeta-six-hvm0b3059n.vercel.app",
     "http://localhost:5173",
+    "http://127.0.0.1:5173"
 ]
 
 # Sesión por cookie entre el frontend (Vercel) y la API (Render): el navegador
