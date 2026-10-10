@@ -20,10 +20,25 @@ from .workload import format_hours
 
 # Formato único de fechas que ve el usuario (igual que en el frontend): DD/Mmm/AAAA, p. ej. 11/Sep/2026
 MONTHS_SHORT = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+_ALLOWED_STATUS = ", ".join(LogisticSubtask.Status.values)
 
 
 def format_date(value):
     return f"{value.day:02d}/{MONTHS_SHORT[value.month - 1]}/{value.year}"
+
+
+def calculate_progress_data(event):
+    """Calcula el progreso de preparación del evento sin persistirlo (US-10, PI-152)."""
+    subtasks = event.subtasks.all()
+    total = subtasks.count()
+    executed = subtasks.filter(status=LogisticSubtask.Status.DONE).count()
+    percentage = round((executed / total) * 100, 1) if total > 0 else 0.0
+    return {
+        "total": total,
+        "executed": executed,
+        "completed": executed,
+        "percentage": percentage,
+    }
 
 
 class LogisticSubtaskSerializer(serializers.ModelSerializer):
@@ -31,6 +46,22 @@ class LogisticSubtaskSerializer(serializers.ModelSerializer):
     Serializador para operaciones sobre subtareas logísticas.
     Al crear, la vista pasa el evento en el contexto (context={"event": evento}).
     """
+
+    status = serializers.ChoiceField(
+        choices=LogisticSubtask.Status.choices,
+        required=False,
+        error_messages={
+            "invalid_choice": (
+                f"El estado '{{input}}' no es válido. "
+                f"Valores permitidos: {_ALLOWED_STATUS}."
+            ),
+        },
+    )
+    note = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+    )
 
     class Meta:
         model = LogisticSubtask
@@ -155,13 +186,25 @@ class DailyLimitSerializer(serializers.ModelSerializer):
         fields = ["daily_hours_limit"]
 
 
+class EventProgressSerializer(serializers.Serializer):
+    """Representación del progreso calculado de un evento (US-10, PI-151)."""
+
+    event_id = serializers.IntegerField(read_only=True)
+    event_name = serializers.CharField(read_only=True)
+    total = serializers.IntegerField(read_only=True)
+    executed = serializers.IntegerField(read_only=True)
+    completed = serializers.IntegerField(read_only=True)
+    percentage = serializers.FloatField(read_only=True)
+
+
 class EventSerializer(serializers.ModelSerializer):
     """
-    Serializador para eventos, con soporte para lectura de sus subtareas asociadas.
+    Serializador para eventos, con soporte para lectura de sus subtareas y progreso (PI-153).
     """
 
     subtasks = LogisticSubtaskSerializer(many=True, read_only=True)
     total_subtasks = serializers.IntegerField(source="subtasks.count", read_only=True)
+    progress = serializers.SerializerMethodField()
 
     class Meta:
         model = Event
@@ -177,9 +220,13 @@ class EventSerializer(serializers.ModelSerializer):
             "status",
             "created_at",
             "total_subtasks",
+            "progress",
             "subtasks",
         ]
-        read_only_fields = ["id", "user", "created_at", "subtasks", "total_subtasks"]
+        read_only_fields = ["id", "user", "created_at", "subtasks", "total_subtasks", "progress"]
+
+    def get_progress(self, obj):
+        return calculate_progress_data(obj)
 
     def validate_name(self, value):
         """Valida que el nombre no contenga únicamente espacios en blanco."""
@@ -203,7 +250,7 @@ class EventSerializer(serializers.ModelSerializer):
 
 
 class TodaySubtaskSerializer(serializers.ModelSerializer):
-    """Gestión en la vista 'Hoy', con el evento al que pertenece."""
+    """Gestión en la vista 'Hoy', con el evento al que pertenece y su nota."""
 
     event_id = serializers.IntegerField(source="event.id", read_only=True)
     event_name = serializers.CharField(source="event.name", read_only=True)
@@ -221,11 +268,9 @@ class TodaySubtaskSerializer(serializers.ModelSerializer):
             "estimated_hours",
             "priority",
             "status",
+            "note",
             "is_overdue",
         ]
-
-
-_ALLOWED_STATUS = ", ".join(LogisticSubtask.Status.values)
 
 
 class TodayFilterSerializer(serializers.Serializer):

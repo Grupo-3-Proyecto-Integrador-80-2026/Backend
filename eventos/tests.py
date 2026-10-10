@@ -1145,3 +1145,140 @@ class DailyLimitSettingsTests(TestCase):
         self.assertEqual(
             response.json()["error"], "Quedarías con 5h de gestión planificadas (límite 4h)."
         )
+
+class SubtaskExecutionAndPostponeTests(TestCase):
+    """US-09 (PI-139, PI-140, PI-141): Actualizar status y note en PATCH /api/subtasks/:id/."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("organizador", email="org@eventos.com", password="x")
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+        self.event = Event.objects.create(user=self.user, name="Boda", event_date=self.today + timedelta(days=10))
+        self.subtask = LogisticSubtask.objects.create(
+            event=self.event,
+            name="Catering",
+            scheduled_date=self.today,
+            status=LogisticSubtask.Status.PENDING,
+            estimated_hours=Decimal("2.0"),
+        )
+
+    def patch(self, payload):
+        return self.client.patch(
+            f"/api/subtasks/{self.subtask.id}/",
+            payload,
+            content_type="application/json",
+        )
+
+    def test_mark_subtask_as_done(self):
+        response = self.patch({"status": "done"})
+        self.assertEqual(response.status_code, 200)
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.status, LogisticSubtask.Status.DONE)
+
+    def test_postpone_subtask_with_optional_note(self):
+        note = "Esperando confirmación del proveedor de mantelería"
+        response = self.patch({"status": "postponed", "note": note})
+        self.assertEqual(response.status_code, 200)
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.status, LogisticSubtask.Status.POSTPONED)
+        self.assertEqual(self.subtask.note, note)
+
+    def test_postpone_subtask_without_note_is_valid(self):
+        response = self.patch({"status": "postponed"})
+        self.assertEqual(response.status_code, 200)
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.status, LogisticSubtask.Status.POSTPONED)
+
+    def test_invalid_status_returns_400_with_allowed_choices(self):
+        response = self.patch({"status": "finalizado_invalido"})
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertIn("error", body)
+        self.assertIn("status", body["details"])
+        self.assertIn("Valores permitidos", body["details"]["status"][0])
+
+    def test_note_can_be_cleared_or_empty(self):
+        self.subtask.note = "Nota anterior"
+        self.subtask.save()
+        response = self.patch({"note": ""})
+        self.assertEqual(response.status_code, 200)
+        self.subtask.refresh_from_db()
+        self.assertEqual(self.subtask.note, "")
+
+    def test_today_view_includes_note_for_subtasks(self):
+        self.subtask.note = "Nota visible en hoy"
+        self.subtask.save()
+        res = self.client.get("/api/today/").json()
+        all_tasks = res["overdue"] + res["due_today"] + res["upcoming"]
+        task_in_today = next(t for t in all_tasks if t["id"] == self.subtask.id)
+        self.assertEqual(task_in_today["note"], "Nota visible en hoy")
+
+
+class EventProgressTests(TestCase):
+    """US-10 (PI-151, PI-152, PI-153): Progreso de preparación del evento."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("organizador", email="org@eventos.com", password="x")
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+        self.event = Event.objects.create(
+            user=self.user, name="Boda de Prueba", event_date=self.today + timedelta(days=15)
+        )
+
+    def test_event_without_subtasks_has_zero_progress(self):
+        response = self.client.get(f"/api/progress/?event={self.event.id}")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["total"], 0)
+        self.assertEqual(data["executed"], 0)
+        self.assertEqual(data["completed"], 0)
+        self.assertEqual(data["percentage"], 0.0)
+
+    def test_progress_calculation_counts_only_done_as_executed(self):
+        # 1 done, 1 in_progress, 1 pending, 1 postponed -> total: 4, executed: 1, 25.0%
+        LogisticSubtask.objects.create(event=self.event, name="T1", scheduled_date=self.today, status="done")
+        LogisticSubtask.objects.create(event=self.event, name="T2", scheduled_date=self.today, status="in_progress")
+        LogisticSubtask.objects.create(event=self.event, name="T3", scheduled_date=self.today, status="pending")
+        LogisticSubtask.objects.create(event=self.event, name="T4", scheduled_date=self.today, status="postponed")
+
+        response = self.client.get(f"/api/progress/?event={self.event.id}")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["total"], 4)
+        self.assertEqual(data["executed"], 1)
+        self.assertEqual(data["completed"], 1)
+        self.assertEqual(data["percentage"], 25.0)
+
+    def test_progress_list_returns_all_organizer_events(self):
+        other = Event.objects.create(
+            user=self.user, name="Cumpleaños", event_date=self.today + timedelta(days=20)
+        )
+        LogisticSubtask.objects.create(event=other, name="T1", scheduled_date=self.today, status="done")
+
+        response = self.client.get("/api/progress/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data), 2)
+        event_names = [e["event_name"] for e in data]
+        self.assertIn("Boda de Prueba", event_names)
+        self.assertIn("Cumpleaños", event_names)
+
+    def test_event_detail_includes_calculated_progress(self):
+        LogisticSubtask.objects.create(event=self.event, name="T1", scheduled_date=self.today, status="done")
+        LogisticSubtask.objects.create(event=self.event, name="T2", scheduled_date=self.today, status="pending")
+
+        response = self.client.get(f"/api/events/{self.event.id}/")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn("progress", body)
+        self.assertEqual(body["progress"]["total"], 2)
+        self.assertEqual(body["progress"]["executed"], 1)
+        self.assertEqual(body["progress"]["percentage"], 50.0)
+
+    def test_cannot_access_foreign_event_progress(self):
+        foreign_user = User.objects.create_user("ajeno", password="x")
+        foreign_event = Event.objects.create(
+            user=foreign_user, name="Ajeno", event_date=self.today + timedelta(days=5)
+        )
+        response = self.client.get(f"/api/progress/?event={foreign_event.id}")
+        self.assertEqual(response.status_code, 404)
