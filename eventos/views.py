@@ -20,6 +20,7 @@ from .models import UPCOMING_WINDOW_DAYS, Event, LogisticSubtask, User
 from .serializers import (
     AuthUserSerializer,
     DailyLimitSerializer,
+    EventProgressSerializer,
     EventSerializer,
     LoginSerializer,
     LogisticSubtaskSerializer,
@@ -27,6 +28,7 @@ from .serializers import (
     SubtaskUpdateOptionsSerializer,
     TodayFilterSerializer,
     TodaySubtaskSerializer,
+    calculate_progress_data,
 )
 from .workload import ACTIVE_STATUSES, detect_overload
 
@@ -629,3 +631,62 @@ class LogoutAPIView(APIView):
     def post(self, request):
         logout(request)
         return Response({"message": "Sesión cerrada."}, status=status.HTTP_200_OK)
+
+class EventProgressAPIView(APIView):
+    """
+    Progreso de preparación del evento (US-10, PI-151, PI-152).
+    Calcula el total, tareas ejecutadas (status=done) y el porcentaje por evento.
+    """
+
+    @extend_schema(
+        summary="Consultar progreso de eventos",
+        description="Obtiene el conteo de subtareas totales, ejecutadas (hechas) y porcentaje de avance. "
+        "Las tareas pospuestas se consideran no ejecutadas. Permite filtrar por evento mediante ?event=<id>.",
+        parameters=[
+            OpenApiParameter(
+                "event",
+                int,
+                required=False,
+                description="ID del evento específico para consultar su progreso.",
+            ),
+        ],
+        responses={200: EventProgressSerializer(many=True), 400: dict, 404: dict},
+    )
+    def get(self, request):
+        event_param = request.query_params.get("event")
+        user = request.user
+
+        if event_param:
+            try:
+                event_id = int(event_param)
+            except (ValueError, TypeError):
+                return Response(
+                    {
+                        "error": "Parámetro inválido.",
+                        "details": {"event": ["El filtro 'event' debe ser un número entero."]},
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            try:
+                event = Event.objects.get(id=event_id, user=user)
+            except Event.DoesNotExist:
+                return Response(
+                    {"error": f"El evento con ID {event_id} no existe o no pertenece al usuario."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            progress_data = calculate_progress_data(event)
+            progress_data["event_id"] = event.id
+            progress_data["event_name"] = event.name
+            return Response(progress_data, status=status.HTTP_200_OK)
+
+        events = Event.objects.filter(user=user).prefetch_related("subtasks").order_by("-event_date")
+        results = []
+        for ev in events:
+            p = calculate_progress_data(ev)
+            p["event_id"] = ev.id
+            p["event_name"] = ev.name
+            results.append(p)
+
+        return Response(results, status=status.HTTP_200_OK)
