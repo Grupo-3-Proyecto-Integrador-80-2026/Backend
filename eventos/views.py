@@ -399,7 +399,10 @@ class SubtaskDetailAPIView(APIView):
 
 
 class TodayAPIView(APIView):
-    """Gestiones del usuario agrupadas en vencidas / para hoy / próximas (US-04, PI-54)."""
+    """
+    Gestiones del usuario agrupadas en vencidas / para hoy / próximas (US-04, PI-54),
+    más las pospuestas en una lista aparte (US-09).
+    """
 
     def _base_queryset(self, user, filters):
         """
@@ -407,17 +410,10 @@ class TodayAPIView(APIView):
 
         Los filtros solo reducen el conjunto; el orden se define aquí y la
         agrupación se hace después, así que ninguno de los dos se altera.
-
-        Las pospuestas no son carga urgente (US-09): no aparecen como vencidas
-        ni suman horas del día, salvo que se pidan con ?status=postponed.
         """
-        hidden = [LogisticSubtask.Status.DONE]
-        if filters.get("status") != LogisticSubtask.Status.POSTPONED:
-            hidden.append(LogisticSubtask.Status.POSTPONED)
-
         subtasks = (
             LogisticSubtask.objects.filter(event__user=user)
-            .exclude(status__in=hidden)
+            .exclude(status=LogisticSubtask.Status.DONE)
             .select_related("event")
             .order_by("scheduled_date", "estimated_hours", "id")
         )
@@ -433,7 +429,8 @@ class TodayAPIView(APIView):
     @extend_schema(
         summary="Vista Hoy",
         description="Devuelve las gestiones agrupadas en vencidas, para hoy y próximas "
-        "(ventana de 7 días), con filtros opcionales por evento y por estado.",
+        "(ventana de 7 días), con filtros opcionales por evento y por estado. "
+        "Las pospuestas van aparte en 'postponed': no son carga urgente del día.",
         parameters=[
             OpenApiParameter(
                 "event",
@@ -467,9 +464,13 @@ class TodayAPIView(APIView):
 
         subtasks = self._base_queryset(user, filters.validated_data)
 
-        overdue = subtasks.overdue(today)
-        due_today = subtasks.filter(scheduled_date=today)
-        upcoming = subtasks.upcoming(today)
+        # Las pospuestas no se marcan como vencidas ni suman horas del día (US-09)
+        postponed = subtasks.filter(status=LogisticSubtask.Status.POSTPONED)
+        urgent = subtasks.exclude(status=LogisticSubtask.Status.POSTPONED)
+
+        overdue = urgent.overdue(today)
+        due_today = urgent.filter(scheduled_date=today)
+        upcoming = urgent.upcoming(today)
 
         return Response(
             {
@@ -478,6 +479,7 @@ class TodayAPIView(APIView):
                 "overdue": TodaySubtaskSerializer(overdue, many=True).data,
                 "due_today": TodaySubtaskSerializer(due_today, many=True).data,
                 "upcoming": TodaySubtaskSerializer(upcoming, many=True).data,
+                "postponed": TodaySubtaskSerializer(postponed, many=True).data,
             },
             status=status.HTTP_200_OK,
         )
