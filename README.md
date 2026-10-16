@@ -40,7 +40,7 @@ Las fechas se calculan a partir del día en que se ejecuta. El comando solo modi
 | Método | Ruta | Descripción |
 |---|---|---|
 | GET | `/api/health/` | Verifica que la API esté corriendo |
-GET | `/api/db-test/` | Verifica la conexión con la base de datos y consulta el primer usuario registrado
+GET | `/api/db-test/` | Verifica la conexión con la base de datos (sin exponer datos de usuarios)
 | PATCH | `/api/subtasks/:id/` | Reprograma o edita una gestión. Responde **409** si el día destino supera el límite diario (ver abajo) |
 | GET | `/api/settings/daily-limit/` | Límite diario de horas de gestión del organizador (6 por defecto) |
 | PATCH | `/api/settings/daily-limit/` | Actualiza el límite diario (`{"daily_hours_limit": 4}`, entero de 1 a 16) |

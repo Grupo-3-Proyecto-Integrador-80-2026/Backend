@@ -40,12 +40,28 @@ def suggest_dates(user, subtask, hours, avoid):
     """
     Días entre hoy y la fecha del evento en los que la gestión cabe sin superar
     el límite, empezando por los más cercanos a la fecha que se quería (`avoid`).
+
+    La carga de todo el rango se obtiene en una sola consulta agrupada por día.
     """
     limit = user.daily_hours_limit
     start = timezone.localdate()
     end = subtask.event.event_date
-    if end < start:
+    if end < start or hours > limit:
+        # Sin días posibles: el evento ya pasó o la gestión sola supera el límite
         return []
+
+    loads = (
+        LogisticSubtask.objects.filter(
+            event__user=user,
+            scheduled_date__range=(start, end),
+            status__in=ACTIVE_STATUSES,
+        )
+        .exclude(id=subtask.id)
+        .order_by()
+        .values("scheduled_date")
+        .annotate(total=Sum("estimated_hours"))
+    )
+    load_by_day = {row["scheduled_date"]: row["total"] for row in loads}
 
     candidates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     candidates = [d for d in candidates if d != avoid]
@@ -54,7 +70,7 @@ def suggest_dates(user, subtask, hours, avoid):
 
     suggestions = []
     for day in candidates:
-        if daily_load(user, day, exclude_id=subtask.id) + hours <= limit:
+        if load_by_day.get(day, Decimal("0")) + hours <= limit:
             suggestions.append(day)
             if len(suggestions) == MAX_SUGGESTED_DATES:
                 break

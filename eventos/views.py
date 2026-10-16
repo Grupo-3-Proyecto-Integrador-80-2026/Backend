@@ -25,12 +25,18 @@ from .serializers import (
     LoginSerializer,
     LogisticSubtaskSerializer,
     RegisterSerializer,
+    ProgressFilterSerializer,
     SubtaskUpdateOptionsSerializer,
+    TODAY_STATUS_CHOICES,
     TodayFilterSerializer,
     TodaySubtaskSerializer,
     calculate_progress_data,
 )
 from .workload import ACTIVE_STATUSES, detect_overload
+
+# Sin IDs ni detalles internos: el mismo mensaje sirve si no existe o es de otro organizador
+EVENT_NOT_FOUND_MESSAGE = "El evento no existe o fue eliminado."
+SUBTASK_NOT_FOUND_MESSAGE = "La gestión no existe o fue eliminada."
 
 def health_check(request):
     """Verifica la disponibilidad básica del servicio."""
@@ -78,7 +84,7 @@ class EventListCreateAPIView(APIView):
 
         return Response(
             {
-                "error": "Datos inválidos para la creación del evento.",
+                "error": "Algunos datos del evento no son válidos.",
                 "details": serializer.errors,
             },
             status=status.HTTP_400_BAD_REQUEST,
@@ -91,7 +97,7 @@ class EventDetailAPIView(APIView):
     def _get_event(self, request, event_id):
         user = request.user
         try:
-            return Event.objects.get(id=event_id, user=user)
+            return Event.objects.prefetch_related("subtasks").get(id=event_id, user=user)
         except Event.DoesNotExist:
             return None
 
@@ -105,7 +111,7 @@ class EventDetailAPIView(APIView):
         if not event:
             return Response(
                 {
-                    "error": f"El evento con ID {event_id} no existe o no tiene permisos para consultarlo."
+                    "error": EVENT_NOT_FOUND_MESSAGE
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
@@ -124,7 +130,7 @@ class EventDetailAPIView(APIView):
         if not event:
             return Response(
                 {
-                    "error": f"El evento con ID {event_id} no fue encontrado para actualizar."
+                    "error": EVENT_NOT_FOUND_MESSAGE
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
@@ -136,7 +142,7 @@ class EventDetailAPIView(APIView):
 
         return Response(
             {
-                "error": "Error de validación al actualizar el evento.",
+                "error": "No se pudieron guardar los cambios del evento.",
                 "details": serializer.errors,
             },
             status=status.HTTP_400_BAD_REQUEST,
@@ -152,7 +158,7 @@ class EventDetailAPIView(APIView):
         if not event:
             return Response(
                 {
-                    "error": f"El evento con ID {event_id} no fue encontrado para eliminar."
+                    "error": EVENT_NOT_FOUND_MESSAGE
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
@@ -184,7 +190,7 @@ class EventSubtaskListCreateAPIView(APIView):
         if not event:
             return Response(
                 {
-                    "error": f"El evento con ID {event_id} no existe o no pertenece al usuario."
+                    "error": EVENT_NOT_FOUND_MESSAGE
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
@@ -207,7 +213,7 @@ class EventSubtaskListCreateAPIView(APIView):
         if not event:
             return Response(
                 {
-                    "error": f"No se puede crear la subtarea: el evento con ID {event_id} no existe o no pertenece al usuario."
+                    "error": EVENT_NOT_FOUND_MESSAGE
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
@@ -220,7 +226,7 @@ class EventSubtaskListCreateAPIView(APIView):
         if not options.is_valid():
             return Response(
                 {
-                    "error": "Datos inválidos para la subtarea logística.",
+                    "error": "Algunos datos de la gestión no son válidos.",
                     "details": options.errors,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -230,7 +236,7 @@ class EventSubtaskListCreateAPIView(APIView):
         if not serializer.is_valid():
             return Response(
                 {
-                    "error": "Datos inválidos para la subtarea logística.",
+                    "error": "Algunos datos de la gestión no son válidos.",
                     "details": serializer.errors,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -283,7 +289,7 @@ class SubtaskDetailAPIView(APIView):
         if not subtask:
             return Response(
                 {
-                    "error": f"La subtarea logística con ID {subtask_id} no fue encontrada."
+                    "error": SUBTASK_NOT_FOUND_MESSAGE
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
@@ -305,7 +311,7 @@ class SubtaskDetailAPIView(APIView):
         if not subtask:
             return Response(
                 {
-                    "error": f"La subtarea con ID {subtask_id} no existe o no tiene permisos para modificarla."
+                    "error": SUBTASK_NOT_FOUND_MESSAGE
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
@@ -322,7 +328,7 @@ class SubtaskDetailAPIView(APIView):
         if not options.is_valid():
             return Response(
                 {
-                    "error": "Error de validación al actualizar la subtarea.",
+                    "error": "No se pudieron guardar los cambios de la gestión.",
                     "details": options.errors,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -337,7 +343,7 @@ class SubtaskDetailAPIView(APIView):
         if not serializer.is_valid():
             return Response(
                 {
-                    "error": "Error de validación al actualizar la subtarea.",
+                    "error": "No se pudieron guardar los cambios de la gestión.",
                     "details": serializer.errors,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -386,14 +392,14 @@ class SubtaskDetailAPIView(APIView):
         if not subtask:
             return Response(
                 {
-                    "error": f"La subtarea con ID {subtask_id} no fue encontrada para eliminar."
+                    "error": SUBTASK_NOT_FOUND_MESSAGE
                 },
                 status=status.HTTP_404_NOT_FOUND,
             )
 
         subtask.delete()
         return Response(
-            {"message": f"Subtarea '{subtask.name}' eliminada correctamente."},
+            {"message": f"Gestión '{subtask.name}' eliminada correctamente."},
             status=status.HTTP_200_OK,
         )
 
@@ -442,8 +448,8 @@ class TodayAPIView(APIView):
                 "status",
                 str,
                 required=False,
-                enum=LogisticSubtask.Status.values,
-                description="Estado de la gestión por el que filtrar.",
+                enum=[value for value, _ in TODAY_STATUS_CHOICES],
+                description="Estado de la gestión por el que filtrar (las hechas no se muestran en Hoy).",
             ),
         ],
         responses={200: dict, 400: dict},
@@ -456,7 +462,7 @@ class TodayAPIView(APIView):
         if not filters.is_valid():
             return Response(
                 {
-                    "error": "Parámetros de filtro inválidos.",
+                    "error": "Los filtros elegidos no son válidos.",
                     "details": filters.errors,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -662,26 +668,27 @@ class EventProgressAPIView(APIView):
         responses={200: EventProgressSerializer(many=True), 400: dict, 404: dict},
     )
     def get(self, request):
-        event_param = request.query_params.get("event")
         user = request.user
+        filters = ProgressFilterSerializer(data=request.query_params)
+        if not filters.is_valid():
+            return Response(
+                {
+                    "error": "Los filtros elegidos no son válidos.",
+                    "details": filters.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        if event_param:
-            try:
-                event_id = int(event_param)
-            except (ValueError, TypeError):
+        event_id = filters.validated_data.get("event")
+        if event_id is not None:
+            event = (
+                Event.objects.filter(id=event_id, user=user)
+                .prefetch_related("subtasks")
+                .first()
+            )
+            if event is None:
                 return Response(
-                    {
-                        "error": "Parámetro inválido.",
-                        "details": {"event": ["El filtro 'event' debe ser un número entero."]},
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            try:
-                event = Event.objects.get(id=event_id, user=user)
-            except Event.DoesNotExist:
-                return Response(
-                    {"error": f"El evento con ID {event_id} no existe o no pertenece al usuario."},
+                    {"error": EVENT_NOT_FOUND_MESSAGE},
                     status=status.HTTP_404_NOT_FOUND,
                 )
 

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Max
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -20,7 +21,20 @@ from .workload import format_hours
 
 # Formato único de fechas que ve el usuario (igual que en el frontend): DD/Mmm/AAAA, p. ej. 11/Sep/2026
 MONTHS_SHORT = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
-_ALLOWED_STATUS = ", ".join(LogisticSubtask.Status.values)
+
+
+
+def _labels(choices):
+    """['Pendiente', 'En progreso', 'Hecho'] -> 'Pendiente, En progreso o Hecho'."""
+    labels = [label for _, label in choices]
+    return f"{', '.join(labels[:-1])} o {labels[-1]}"
+
+
+_ALLOWED_STATUS = _labels(LogisticSubtask.Status.choices)
+
+# Mensajes propios para los campos generados desde el modelo (sin textos genéricos de DRF)
+DATE_ERRORS = {"invalid": "Ingresa una fecha válida.", "datetime": "Ingresa una fecha válida."}
+HOURS_INVALID_MESSAGE = "Ingresa un número de horas válido, p. ej. 1.5."
 
 
 def format_date(value):
@@ -29,9 +43,10 @@ def format_date(value):
 
 def calculate_progress_data(event):
     """Calcula el progreso de preparación del evento sin persistirlo (US-10, PI-152)."""
-    subtasks = event.subtasks.all()
-    total = subtasks.count()
-    executed = subtasks.filter(status=LogisticSubtask.Status.DONE).count()
+    # Se cuenta en Python para aprovechar prefetch_related("subtasks") en los listados
+    subtasks = list(event.subtasks.all())
+    total = len(subtasks)
+    executed = sum(1 for t in subtasks if t.status == LogisticSubtask.Status.DONE)
     percentage = round((executed / total) * 100, 1) if total > 0 else 0.0
     return {
         "total": total,
@@ -52,9 +67,22 @@ class LogisticSubtaskSerializer(serializers.ModelSerializer):
         required=False,
         error_messages={
             "invalid_choice": (
-                f"El estado '{{input}}' no es válido. "
-                f"Valores permitidos: {_ALLOWED_STATUS}."
+                f"El estado elegido no es válido. Elige {_ALLOWED_STATUS}."
             ),
+        },
+    )
+    # Declarado aquí para que los mensajes propios ganen a los del MinValueValidator del modelo
+    estimated_hours = serializers.DecimalField(
+        max_digits=4,
+        decimal_places=1,
+        required=False,
+        error_messages={
+            "invalid": HOURS_INVALID_MESSAGE,
+            "null": "Las horas estimadas son obligatorias.",
+            "max_decimal_places": "Usa como máximo 1 decimal, p. ej. 1.5.",
+            "max_digits": HOURS_INVALID_MESSAGE,
+            "max_whole_digits": HOURS_INVALID_MESSAGE,
+            "max_string_length": HOURS_INVALID_MESSAGE,
         },
     )
     note = serializers.CharField(
@@ -79,6 +107,24 @@ class LogisticSubtaskSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "event", "created_at", "updated_at"]
+        extra_kwargs = {
+            "name": {
+                "error_messages": {
+                    "required": "El nombre de la gestión es obligatorio.",
+                    "blank": "El nombre de la gestión es obligatorio.",
+                    "max_length": "El nombre de la gestión no puede superar los 200 caracteres.",
+                }
+            },
+            "type": {"error_messages": {"invalid_choice": "Elige un tipo de gestión válido."}},
+            "priority": {"error_messages": {"invalid_choice": "Elige una prioridad válida."}},
+            "scheduled_date": {
+                "error_messages": {
+                    **DATE_ERRORS,
+                    "required": "La fecha objetivo es obligatoria.",
+                    "null": "La fecha objetivo es obligatoria.",
+                }
+            },
+        }
 
     def validate_estimated_hours(self, value):
         """
@@ -149,13 +195,13 @@ class SubtaskUpdateOptionsSerializer(serializers.Serializer):
     confirm_overload = serializers.BooleanField(
         required=False,
         default=False,
-        error_messages={"invalid": "El campo 'confirm_overload' debe ser verdadero o falso."},
+        error_messages={"invalid": "No pudimos confirmar el cambio. Inténtalo de nuevo."},
     )
     resolution = serializers.ChoiceField(
         choices=[REDUCE_HOURS],
         required=False,
         error_messages={
-            "invalid_choice": f"La resolución '{{input}}' no es válida. Valor permitido: {REDUCE_HOURS}."
+            "invalid_choice": "La opción elegida para resolver el conflicto no es válida."
         },
     )
 
@@ -224,6 +270,24 @@ class EventSerializer(serializers.ModelSerializer):
             "subtasks",
         ]
         read_only_fields = ["id", "user", "created_at", "subtasks", "total_subtasks", "progress"]
+        extra_kwargs = {
+            "name": {
+                "error_messages": {
+                    "required": "El nombre del evento es obligatorio.",
+                    "blank": "El nombre del evento no puede estar vacío.",
+                    "max_length": "El nombre del evento no puede superar los 200 caracteres.",
+                }
+            },
+            "event_type": {"error_messages": {"invalid_choice": "Elige un tipo de evento válido."}},
+            "status": {"error_messages": {"invalid_choice": "Elige un estado de evento válido."}},
+            "event_date": {
+                "error_messages": {
+                    **DATE_ERRORS,
+                    "required": "La fecha del evento es obligatoria.",
+                    "null": "La fecha del evento es obligatoria.",
+                }
+            },
+        }
 
     def get_progress(self, obj):
         return calculate_progress_data(obj)
@@ -239,13 +303,24 @@ class EventSerializer(serializers.ModelSerializer):
     def validate_event_date(self, value):
         """
         No se pueden crear eventos en el pasado. Al editar, se permite conservar la
-        fecha que ya tenía el evento aunque haya pasado, pero no cambiarla por otra pasada.
+        fecha que ya tenía el evento aunque haya pasado, pero no cambiarla por otra pasada
+        ni dejarla antes de alguna de sus gestiones (que ya no se podrían reprogramar).
         """
-        unchanged = self.instance is not None and value == self.instance.event_date
-        if value < timezone.localdate() and not unchanged:
+        if self.instance is not None and value == self.instance.event_date:
+            return value
+
+        if value < timezone.localdate():
             raise serializers.ValidationError(
                 "La fecha del evento no puede ser anterior a hoy."
             )
+
+        if self.instance is not None:
+            latest = self.instance.subtasks.aggregate(latest=Max("scheduled_date"))["latest"]
+            if latest is not None and value < latest:
+                raise serializers.ValidationError(
+                    "La fecha del evento no puede quedar antes de sus gestiones: la última "
+                    f"está programada para el {format_date(latest)}. Reprográmala primero."
+                )
         return value
 
 
@@ -273,27 +348,50 @@ class TodaySubtaskSerializer(serializers.ModelSerializer):
         ]
 
 
-class TodayFilterSerializer(serializers.Serializer):
-    """Valida los parámetros de consulta opcionales de GET /api/today/ (US-05)."""
-
-    event = serializers.IntegerField(
+def _event_filter_field():
+    return serializers.IntegerField(
         required=False,
         min_value=1,
         error_messages={
-            "invalid": "El filtro 'event' debe ser un número entero.",
-            "min_value": "El filtro 'event' debe ser un ID válido (mayor a 0).",
+            "invalid": "El evento seleccionado no es válido.",
+            "min_value": "El evento seleccionado no es válido.",
         },
     )
+
+
+# En Hoy no se muestran las gestiones hechas, así que no se puede filtrar por ese estado
+TODAY_STATUS_CHOICES = [
+    choice for choice in LogisticSubtask.Status.choices
+    if choice[0] != LogisticSubtask.Status.DONE
+]
+
+
+class TodayFilterSerializer(serializers.Serializer):
+    """Valida los parámetros de consulta opcionales de GET /api/today/ (US-05)."""
+
+    event = _event_filter_field()
     status = serializers.ChoiceField(
         choices=LogisticSubtask.Status.choices,
         required=False,
         error_messages={
             "invalid_choice": (
-                f"El estado '{{input}}' no es válido. "
-                f"Valores permitidos: {_ALLOWED_STATUS}."
+                f"El estado elegido no es válido. Elige {_labels(TODAY_STATUS_CHOICES)}."
             ),
         },
     )
+
+    def validate_status(self, value):
+        if value == LogisticSubtask.Status.DONE:
+            raise serializers.ValidationError(
+                "Las gestiones hechas no aparecen en Hoy. Consulta su avance en Progreso."
+            )
+        return value
+
+
+class ProgressFilterSerializer(serializers.Serializer):
+    """Valida el parámetro opcional ?event= de GET /api/progress/ (US-10)."""
+
+    event = _event_filter_field()
 
 
 class LoginSerializer(serializers.Serializer):
