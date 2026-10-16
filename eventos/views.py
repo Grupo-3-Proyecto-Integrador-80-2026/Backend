@@ -407,10 +407,17 @@ class TodayAPIView(APIView):
 
         Los filtros solo reducen el conjunto; el orden se define aquí y la
         agrupación se hace después, así que ninguno de los dos se altera.
+
+        Las pospuestas no son carga urgente (US-09): no aparecen como vencidas
+        ni suman horas del día, salvo que se pidan con ?status=postponed.
         """
+        hidden = [LogisticSubtask.Status.DONE]
+        if filters.get("status") != LogisticSubtask.Status.POSTPONED:
+            hidden.append(LogisticSubtask.Status.POSTPONED)
+
         subtasks = (
             LogisticSubtask.objects.filter(event__user=user)
-            .exclude(status=LogisticSubtask.Status.DONE)
+            .exclude(status__in=hidden)
             .select_related("event")
             .order_by("scheduled_date", "estimated_hours", "id")
         )
