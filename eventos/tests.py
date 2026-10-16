@@ -36,10 +36,14 @@ class OverdueConditionTests(TestCase):
     def test_done_is_never_overdue(self):
         self.assertFalse(self.make(-5, status="done").is_overdue)
 
+    def test_postponed_is_never_overdue(self):
+        self.assertFalse(self.make(-5, status="postponed").is_overdue)
+
     def test_queryset_matches_property(self):
         for d in (-3, -1, 0, 2):
             self.make(d)
         self.make(-4, status="done")
+        self.make(-4, status="postponed")
         from_qs = set(LogisticSubtask.objects.overdue().values_list("id", flat=True))
         from_prop = {t.id for t in LogisticSubtask.objects.all() if t.is_overdue}
         self.assertEqual(from_qs, from_prop)
@@ -1195,7 +1199,10 @@ class SubtaskExecutionAndPostponeTests(TestCase):
         body = response.json()
         self.assertIn("error", body)
         self.assertIn("status", body["details"])
-        self.assertIn("Valores permitidos", body["details"]["status"][0])
+        self.assertEqual(
+            body["details"]["status"],
+            ["El estado elegido no es válido. Elige Pendiente, En progreso, Hecho o Pospuesto."],
+        )
 
     def test_note_can_be_cleared_or_empty(self):
         self.subtask.note = "Nota anterior"
@@ -1276,8 +1283,13 @@ class TodayPostponedSectionTests(TestCase):
         )
 
     def test_done_never_appear(self):
-        groups = self.groups("?status=done")
-        self.assertEqual(groups, {g: [] for g in self.GROUPS})
+        names = [n for group in self.groups().values() for n in group]
+        self.assertNotIn("hoy_hecha", names)
+
+    def test_done_filter_is_rejected_with_clear_message(self):
+        response = self.client.get("/api/today/?status=done")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("hechas no aparecen en Hoy", response.json()["details"]["status"][0])
 
 
 class EventProgressTests(TestCase):
@@ -1348,3 +1360,293 @@ class EventProgressTests(TestCase):
         )
         response = self.client.get(f"/api/progress/?event={foreign_event.id}")
         self.assertEqual(response.status_code, 404)
+
+
+class ErrorPayloadFormatTests(TestCase):
+    """TS-03: todos los errores salen como {"error": ...} en español, nunca {"detail": ...} ni HTML."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("organizador", email="org@eventos.com", password="x")
+        self.client.force_login(self.user)
+
+    def assert_error_payload(self, response, status_code):
+        self.assertEqual(response.status_code, status_code)
+        self.assertEqual(response["Content-Type"], "application/json")
+        body = response.json()
+        self.assertNotIn("detail", body)
+        self.assertIsInstance(body["error"], str)
+        return body
+
+    def test_malformed_json_returns_400(self):
+        response = self.client.post(
+            "/api/events/", data="{nombre: 'Boda'", content_type="application/json"
+        )
+        body = self.assert_error_payload(response, 400)
+        self.assertIn("No pudimos leer los datos", body["error"])
+
+    def test_unsupported_media_type_returns_415(self):
+        response = self.client.post("/api/events/", data="Boda", content_type="text/plain")
+        self.assert_error_payload(response, 415)
+
+    def test_method_not_allowed_returns_405(self):
+        response = self.client.put("/api/today/", data={}, content_type="application/json")
+        self.assert_error_payload(response, 405)
+
+    def test_unknown_route_returns_json_404(self):
+        for url in ("/api/no-existe/", "/api/events/abc/"):
+            with self.subTest(url=url):
+                self.assert_error_payload(self.client.get(url), 404)
+
+    def test_missing_resources_do_not_expose_ids(self):
+        event_body = self.assert_error_payload(self.client.get("/api/events/9999/"), 404)
+        subtask_body = self.assert_error_payload(self.client.get("/api/subtasks/9999/"), 404)
+        self.assertEqual(event_body["error"], "El evento no existe o fue eliminado.")
+        self.assertEqual(subtask_body["error"], "La gestión no existe o fue eliminada.")
+
+    def test_missing_csrf_token_returns_403_with_friendly_message(self):
+        from django.test import Client
+
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.user)
+        response = client.post(
+            "/api/events/",
+            {"name": "Boda", "event_date": "2099-01-01"},
+            content_type="application/json",
+        )
+        body = self.assert_error_payload(response, 403)
+        self.assertIn("Recarga la página", body["error"])
+        self.assertNotIn("CSRF", body["error"])
+
+    def test_csrf_middleware_rejection_is_json(self):
+        """Las vistas que no son de DRF también responden {"error"} si falla el CSRF."""
+        from django.test import Client
+
+        client = Client(enforce_csrf_checks=True)
+        body = self.assert_error_payload(client.post("/api/health/"), 403)
+        self.assertIn("Recarga la página", body["error"])
+
+    def test_progress_filter_is_validated_like_today(self):
+        for query in ("?event=abc", "?event=-1", "?event=0"):
+            with self.subTest(query=query):
+                body = self.assert_error_payload(self.client.get(f"/api/progress/{query}"), 400)
+                self.assertIn("event", body["details"])
+
+
+class FriendlyValidationMessagesTests(TestCase):
+    """Los errores por campo usan mensajes propios en español, no los genéricos de DRF/Django."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("organizador", email="org@eventos.com", password="x")
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+        self.event = Event.objects.create(
+            user=self.user, name="Boda", event_date=self.today + timedelta(days=10)
+        )
+
+    def create_subtask(self, **fields):
+        payload = {"name": "Reservar salón", "scheduled_date": self.today.isoformat(), **fields}
+        return self.client.post(
+            f"/api/events/{self.event.id}/subtasks/", payload, content_type="application/json"
+        )
+
+    def details(self, response):
+        self.assertEqual(response.status_code, 400)
+        return response.json()["details"]
+
+    def test_negative_hours_use_own_message(self):
+        details = self.details(self.create_subtask(estimated_hours="-1"))
+        self.assertEqual(
+            details["estimated_hours"], ["Las horas estimadas deben ser un valor mayor a 0."]
+        )
+
+    def test_more_than_one_decimal_is_explained(self):
+        details = self.details(self.create_subtask(estimated_hours="0.05"))
+        self.assertEqual(details["estimated_hours"], ["Usa como máximo 1 decimal, p. ej. 1.5."])
+
+    def test_non_numeric_hours_are_explained(self):
+        details = self.details(self.create_subtask(estimated_hours="mucho"))
+        self.assertEqual(
+            details["estimated_hours"], ["Ingresa un número de horas válido, p. ej. 1.5."]
+        )
+
+    def test_invalid_choices_use_own_messages(self):
+        details = self.details(self.create_subtask(type="magia", priority="urgente"))
+        self.assertEqual(details["type"], ["Elige un tipo de gestión válido."])
+        self.assertEqual(details["priority"], ["Elige una prioridad válida."])
+
+        response = self.client.post(
+            "/api/events/",
+            {"name": "Fiesta", "event_type": "party", "event_date": "fecha"},
+            content_type="application/json",
+        )
+        details = self.details(response)
+        self.assertEqual(details["event_type"], ["Elige un tipo de evento válido."])
+        self.assertEqual(details["event_date"], ["Ingresa una fecha válida."])
+
+    def test_invalid_subtask_date_format_is_explained(self):
+        details = self.details(self.create_subtask(scheduled_date="31-02-2026"))
+        self.assertEqual(details["scheduled_date"], ["Ingresa una fecha válida."])
+
+
+class EventDateKeepsSubtasksInsideTests(TestCase):
+    """La fecha del evento no puede quedar antes de alguna de sus gestiones."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("organizador", email="org@eventos.com", password="x")
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+        self.event = Event.objects.create(
+            user=self.user, name="Boda", event_date=self.today + timedelta(days=10)
+        )
+        LogisticSubtask.objects.create(
+            event=self.event, name="Catering", scheduled_date=self.today + timedelta(days=8)
+        )
+
+    def move_event(self, days):
+        return self.client.patch(
+            f"/api/events/{self.event.id}/",
+            {"event_date": (self.today + timedelta(days=days)).isoformat()},
+            content_type="application/json",
+        )
+
+    def test_moving_before_last_subtask_is_rejected(self):
+        response = self.move_event(5)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("antes de sus gestiones", response.json()["details"]["event_date"][0])
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.event_date, self.today + timedelta(days=10))
+
+    def test_moving_to_last_subtask_day_or_later_is_allowed(self):
+        self.assertEqual(self.move_event(8).status_code, 200)
+        self.assertEqual(self.move_event(20).status_code, 200)
+
+    def test_event_without_subtasks_can_move_earlier(self):
+        empty = Event.objects.create(
+            user=self.user, name="Cumpleaños", event_date=self.today + timedelta(days=10)
+        )
+        response = self.client.patch(
+            f"/api/events/{empty.id}/",
+            {"event_date": self.today.isoformat()},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+
+class ProgressRoundingTests(TestCase):
+    def test_one_of_three_done_is_33_point_3(self):
+        user = User.objects.create_user("organizador", password="x")
+        self.client.force_login(user)
+        today = timezone.localdate()
+        event = Event.objects.create(user=user, name="Boda", event_date=today)
+        for status in ("done", "pending", "postponed"):
+            LogisticSubtask.objects.create(
+                event=event, name=status, scheduled_date=today, status=status
+            )
+        data = self.client.get(f"/api/progress/?event={event.id}").json()
+        self.assertEqual(data["percentage"], 33.3)
+
+
+class QueryCountTests(TestCase):
+    """Los listados y el conflicto hacen un número de consultas que no crece con los datos."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("organizador", password="x")
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+
+    def add_events(self, count):
+        for i in range(count):
+            event = Event.objects.create(
+                user=self.user, name=f"Evento {i}", event_date=self.today + timedelta(days=30)
+            )
+            for status in ("done", "pending"):
+                LogisticSubtask.objects.create(
+                    event=event, name=status, scheduled_date=self.today, status=status
+                )
+
+    def count_queries(self, url):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            self.assertEqual(self.client.get(url).status_code, 200)
+        return len(ctx.captured_queries)
+
+    def test_lists_do_not_grow_with_events(self):
+        for url in ("/api/events/", "/api/progress/"):
+            with self.subTest(url=url):
+                Event.objects.all().delete()
+                self.add_events(2)
+                few = self.count_queries(url)
+                self.add_events(8)
+                self.assertEqual(self.count_queries(url), few)
+
+    def overload_queries(self, event_days):
+        """Cada día hasta el evento tiene 1h ocupada: ninguno admite la gestión de 6h."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        event = Event.objects.create(
+            user=self.user, name="Lejano", event_date=self.today + timedelta(days=event_days)
+        )
+        LogisticSubtask.objects.bulk_create(
+            LogisticSubtask(
+                event=event, name=f"Ocupa {i}", scheduled_date=self.today + timedelta(days=i),
+                estimated_hours=Decimal("1.0"),
+            )
+            for i in range(event_days + 1)
+        )
+        moving = LogisticSubtask.objects.create(
+            event=event, name="Mover", scheduled_date=self.today + timedelta(days=1),
+            estimated_hours="6.0",
+        )
+        with CaptureQueriesContext(connection) as ctx:
+            response = self.client.patch(
+                f"/api/subtasks/{moving.id}/",
+                {"scheduled_date": self.today.isoformat()},
+                content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["details"]["suggested_dates"], [])
+        return len(ctx.captured_queries)
+
+    def test_overload_suggestions_do_not_query_per_day(self):
+        near = self.overload_queries(10)
+        Event.objects.all().delete()
+        self.assertEqual(self.overload_queries(365), near)
+
+    def test_no_suggestions_when_hours_exceed_limit(self):
+        from .workload import suggest_dates
+
+        event = Event.objects.create(
+            user=self.user, name="Boda", event_date=self.today + timedelta(days=365)
+        )
+        draft = LogisticSubtask(event=event)
+        with self.assertNumQueries(0):
+            self.assertEqual(suggest_dates(self.user, draft, Decimal("20"), self.today), [])
+
+
+class TodayMidnightBoundaryTests(TestCase):
+    """'Hoy' es la fecha de Bogotá aunque en UTC ya sea el día siguiente."""
+
+    def test_late_night_in_bogota_is_still_today(self):
+        from datetime import date, datetime, timezone as dt_timezone
+        from unittest import mock
+
+        user = User.objects.create_user("organizador", password="x")
+        self.client.force_login(user)
+        event = Event.objects.create(user=user, name="Boda", event_date=date(2026, 10, 30))
+        for name, day in (("hoy", 16), ("manana", 17), ("ayer", 15)):
+            LogisticSubtask.objects.create(
+                event=event, name=name, scheduled_date=date(2026, 10, day)
+            )
+
+        # 23:30 del 16/Oct en Bogotá (UTC-5) = 04:30 del 17/Oct en UTC
+        utc_now = datetime(2026, 10, 17, 4, 30, tzinfo=dt_timezone.utc)
+        with mock.patch("django.utils.timezone.now", return_value=utc_now):
+            data = self.client.get("/api/today/").json()
+
+        self.assertEqual(data["today"], "2026-10-16")
+        self.assertEqual([t["name"] for t in data["overdue"]], ["ayer"])
+        self.assertEqual([t["name"] for t in data["due_today"]], ["hoy"])
+        self.assertEqual([t["name"] for t in data["upcoming"]], ["manana"])

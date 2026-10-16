@@ -120,10 +120,10 @@ class LogisticSubtaskQuerySet(models.QuerySet):
     """Consultas reutilizables sobre gestiones logísticas."""
 
     def overdue(self, today=None):
-        """Gestiones vencidas: fecha objetivo anterior a hoy y no terminadas."""
+        """Gestiones vencidas: fecha objetivo anterior a hoy, ni hechas ni pospuestas (US-09)."""
         today = today or timezone.localdate()
         return self.filter(scheduled_date__lt=today).exclude(
-            status=LogisticSubtask.Status.DONE  # <- aquí excluirías también POSTPONED si hiciera falta
+            status__in=LogisticSubtask.NOT_OVERDUE_STATUSES
         )
 
     def upcoming(self, today=None, days=UPCOMING_WINDOW_DAYS):
@@ -159,6 +159,10 @@ class LogisticSubtask(models.Model):
         LOW = "low", "Baja"
         MEDIUM = "medium", "Media"
         HIGH = "high", "Alta"
+
+    # Las hechas ya se ejecutaron y las pospuestas se apartaron a propósito:
+    # ninguna de las dos cuenta como vencida (US-09).
+    NOT_OVERDUE_STATUSES = (Status.DONE, Status.POSTPONED)
 
     objects = LogisticSubtaskQuerySet.as_manager()
 
@@ -213,8 +217,8 @@ class LogisticSubtask(models.Model):
 
     @property
     def is_overdue(self):
-        """True si la fecha objetivo ya pasó y la gestión no está hecha."""
+        """True si la fecha objetivo ya pasó y la gestión no está hecha ni pospuesta."""
         return (
-            self.status != self.Status.DONE
+            self.status not in self.NOT_OVERDUE_STATUSES
             and self.scheduled_date < timezone.localdate()
         )

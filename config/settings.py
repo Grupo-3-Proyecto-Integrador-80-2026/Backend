@@ -140,6 +140,8 @@ CORS_ALLOWED_ORIGINS = [
 # debe enviar la cookie en peticiones de otro origen y aceptar su token CSRF.
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
+# El rechazo de CSRF del middleware también responde {"error": ...} (TS-03)
+CSRF_FAILURE_VIEW = "eventos.exceptions.json_csrf_failure"
 
 if not DEBUG:
     # En producción los dominios son distintos: las cookies deben ser SameSite=None
