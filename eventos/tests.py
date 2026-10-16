@@ -107,8 +107,8 @@ class FiltersPreserveGroupingAndOrderTests(TestCase):
             (self.ev1, "h1", 0, "3.0", "pending"),
             (self.ev2, "h2", 0, "1.0", "in_progress"),
             (self.ev1, "u1", 2, "1.0", "pending"),
-            (self.ev1, "u2", 2, "0.5", "postponed"),  # empate con u1
-            (self.ev2, "u3", 3, "2.0", "postponed"),
+            (self.ev1, "u2", 2, "0.5", "in_progress"),  # empate con u1
+            (self.ev2, "u3", 3, "2.0", "in_progress"),
             (self.ev2, "u4", 1, "1.0", "pending"),
         ]
         for event, name, days, hours, status in rows:
@@ -1212,6 +1212,52 @@ class SubtaskExecutionAndPostponeTests(TestCase):
         all_tasks = res["overdue"] + res["due_today"] + res["upcoming"]
         task_in_today = next(t for t in all_tasks if t["id"] == self.subtask.id)
         self.assertEqual(task_in_today["note"], "Nota visible en hoy")
+
+
+class TodayHidesPostponedTests(TestCase):
+    """US-09: las pospuestas salen de la carga urgente de /hoy salvo que se filtren."""
+
+    GROUPS = ("overdue", "due_today", "upcoming")
+
+    def setUp(self):
+        self.user = User.objects.create_user("organizador", email="org@eventos.com", password="x")
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+        event = Event.objects.create(user=self.user, name="Boda", event_date=self.today + timedelta(days=10))
+        for name, days, status in [
+            ("vencida_pendiente", -2, "pending"),
+            ("vencida_pospuesta", -2, "postponed"),
+            ("hoy_pospuesta", 0, "postponed"),
+            ("hoy_hecha", 0, "done"),
+        ]:
+            LogisticSubtask.objects.create(
+                event=event,
+                name=name,
+                scheduled_date=self.today + timedelta(days=days),
+                status=status,
+            )
+
+    def groups(self, query=""):
+        data = self.client.get(f"/api/today/{query}").json()
+        return {g: [t["name"] for t in data[g]] for g in self.GROUPS}
+
+    def test_postponed_are_hidden_by_default(self):
+        self.assertEqual(
+            self.groups(),
+            {"overdue": ["vencida_pendiente"], "due_today": [], "upcoming": []},
+        )
+
+    def test_postponed_filter_shows_them_in_their_group(self):
+        self.assertEqual(
+            self.groups("?status=postponed"),
+            {"overdue": ["vencida_pospuesta"], "due_today": ["hoy_pospuesta"], "upcoming": []},
+        )
+
+    def test_done_stay_hidden_even_when_filtered(self):
+        self.assertEqual(
+            self.groups("?status=done"),
+            {"overdue": [], "due_today": [], "upcoming": []},
+        )
 
 
 class EventProgressTests(TestCase):
