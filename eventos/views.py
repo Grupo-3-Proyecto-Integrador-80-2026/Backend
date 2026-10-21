@@ -299,10 +299,15 @@ class SubtaskDetailAPIView(APIView):
 
     @extend_schema(
         summary="Actualizar parcialmente una subtarea",
-        description="Permite reprogramar fechas, actualizar estado (hecho/pospuesto), horas estimadas o notas. "
-        "Si el cambio deja el día por encima del límite diario del organizador responde 409 con la fecha, "
-        "las horas resultantes, el límite y días sugeridos; se guarda igual enviando confirm_overload=true. "
-        "Con resolution=reduce_hours las nuevas horas deben ser menores que las actuales.",
+        description="Permite reprogramar fechas, actualizar estado (hecho/pospuesto), horas estimadas o notas.\n\n"
+        "Comportamiento de reactivación automática:\n"
+        "- Si la gestión tiene estado 'pospuesto' (postponed) y se actualiza su fecha objetivo (scheduled_date) "
+        "sin especificar un nuevo estado, pasa automáticamente a 'pendiente' (pending).\n"
+        "- Dicha reactivación evalúa la carga horaria en el día destino frente al límite diario del organizador.\n\n"
+        "Control de sobrecarga (409 Conflict):\n"
+        "- Si la asignación resultante excede el límite diario, responde 409 con el detalle del conflicto, horas resultantes y fechas sugeridas.\n"
+        "- Se puede forzar el guardado enviando confirm_overload=true.\n"
+        "- Con resolution=reduce_hours se exige que estimated_hours sea menor que las horas actuales.",
         request=LogisticSubtaskSerializer,
         responses={200: LogisticSubtaskSerializer, 400: dict, 404: dict, 409: dict},
     )
@@ -348,6 +353,17 @@ class SubtaskDetailAPIView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Reactivación automática de gestiones pospuestas (US-06 / US-09):
+        # Al cambiar la fecha objetivo de una gestión pospuesta sin enviar otro estado explícito,
+        # pasa automáticamente a 'pending' y se evalúa su sobrecarga en el día destino.
+        if (
+            subtask.status == LogisticSubtask.Status.POSTPONED
+            and "status" not in request.data
+            and "scheduled_date" in serializer.validated_data
+            and serializer.validated_data["scheduled_date"] != subtask.scheduled_date
+        ):
+            serializer.validated_data["status"] = LogisticSubtask.Status.PENDING
 
         with transaction.atomic():
             User.objects.select_for_update().get(pk=request.user.pk)

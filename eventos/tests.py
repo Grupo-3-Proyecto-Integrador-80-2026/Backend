@@ -1650,3 +1650,175 @@ class TodayMidnightBoundaryTests(TestCase):
         self.assertEqual([t["name"] for t in data["overdue"]], ["ayer"])
         self.assertEqual([t["name"] for t in data["due_today"]], ["hoy"])
         self.assertEqual([t["name"] for t in data["upcoming"]], ["manana"])
+
+
+
+class PostponedSubtaskReactivationTests(TestCase):
+    """
+    Pruebas para la reactivación automática de gestiones pospuestas al cambiar su fecha
+    objetivo y la respectiva evaluación de sobrecarga diaria (HTTP 409).
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "organizador_reactivacion",
+            email="reactiva@eventos.com",
+            password="Password123!",
+        )
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+        self.event = Event.objects.create(
+            user=self.user,
+            name="Gala Anual",
+            event_date=self.today + timedelta(days=15),
+        )
+        self.target_day = self.today + timedelta(days=3)
+        self.postponed_task = LogisticSubtask.objects.create(
+            event=self.event,
+            name="Cotizar mantelería",
+            scheduled_date=self.today,
+            status=LogisticSubtask.Status.POSTPONED,
+            estimated_hours=Decimal("2.0"),
+            note="Pospuesta esperando respuesta de proveedor",
+        )
+
+    def test_reschedule_postponed_subtask_reactivates_automatically_to_pending(self):
+        """Al cambiar la fecha de una gestión pospuesta sin enviar status, pasa a pending."""
+        response = self.client.patch(
+            f"/api/subtasks/{self.postponed_task.id}/",
+            {"scheduled_date": self.target_day.isoformat()},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], LogisticSubtask.Status.PENDING)
+        self.assertEqual(body["scheduled_date"], self.target_day.isoformat())
+
+        self.postponed_task.refresh_from_db()
+        self.assertEqual(self.postponed_task.status, LogisticSubtask.Status.PENDING)
+        self.assertEqual(self.postponed_task.scheduled_date, self.target_day)
+
+    def test_reschedule_postponed_subtask_with_explicit_status_remains_postponed(self):
+        """Si se envía explícitamente status='postponed', se respeta la decisión del usuario."""
+        response = self.client.patch(
+            f"/api/subtasks/{self.postponed_task.id}/",
+            {
+                "scheduled_date": self.target_day.isoformat(),
+                "status": "postponed",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], LogisticSubtask.Status.POSTPONED)
+
+        self.postponed_task.refresh_from_db()
+        self.assertEqual(self.postponed_task.status, LogisticSubtask.Status.POSTPONED)
+
+    def test_reactivation_evaluates_overload_and_returns_409_conflict(self):
+        """Si la reactivación causa sobrecarga en el día destino, responde 409."""
+        # Usuario con límite de 6h. Llenamos 5h en target_day.
+        LogisticSubtask.objects.create(
+            event=self.event,
+            name="Gestión pesada previa",
+            scheduled_date=self.target_day,
+            estimated_hours=Decimal("5.0"),
+            status=LogisticSubtask.Status.PENDING,
+        )
+
+        # Mover postponed_task (2.0h) a target_day sumaría 7.0h (límite 6h)
+        response = self.client.patch(
+            f"/api/subtasks/{self.postponed_task.id}/",
+            {"scheduled_date": self.target_day.isoformat()},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+        body = response.json()
+        self.assertIn("error", body)
+        self.assertEqual(body["details"]["conflict"], "daily_overload")
+        self.assertEqual(body["details"]["resulting_hours"], 7.0)
+        self.assertEqual(body["details"]["limit_hours"], 6)
+
+        # La gestión debe mantener sus valores originales en base de datos
+        self.postponed_task.refresh_from_db()
+        self.assertEqual(self.postponed_task.status, LogisticSubtask.Status.POSTPONED)
+        self.assertEqual(self.postponed_task.scheduled_date, self.today)
+
+    def test_reactivation_with_confirm_overload_saves_as_pending(self):
+        """Con confirm_overload=True, la gestión se reactiva y se guarda en el día sobrecargado."""
+        LogisticSubtask.objects.create(
+            event=self.event,
+            name="Gestión previa",
+            scheduled_date=self.target_day,
+            estimated_hours=Decimal("5.0"),
+            status=LogisticSubtask.Status.PENDING,
+        )
+
+        response = self.client.patch(
+            f"/api/subtasks/{self.postponed_task.id}/",
+            {
+                "scheduled_date": self.target_day.isoformat(),
+                "confirm_overload": True,
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], LogisticSubtask.Status.PENDING)
+
+        self.postponed_task.refresh_from_db()
+        self.assertEqual(self.postponed_task.status, LogisticSubtask.Status.PENDING)
+        self.assertEqual(self.postponed_task.scheduled_date, self.target_day)
+
+
+class EventTimeFieldTests(TestCase):
+    """Pruebas del nuevo campo event_time en creación, consulta y edición de eventos."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("org_time", password="Password123!")
+        self.client.force_login(self.user)
+        self.today = timezone.localdate()
+
+    def test_create_event_with_time(self):
+        response = self.client.post(
+            "/api/events/",
+            {
+                "name": "Boda Nocturna",
+                "event_type": "wedding",
+                "event_date": (self.today + timedelta(days=20)).isoformat(),
+                "event_time": "19:30:00",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["event_time"], "19:30:00")
+
+    def test_patch_event_time(self):
+        event = Event.objects.create(
+            user=self.user,
+            name="Conferencia",
+            event_date=self.today + timedelta(days=5),
+        )
+        response = self.client.patch(
+            f"/api/events/{event.id}/",
+            {"event_time": "10:00:00"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["event_time"], "10:00:00")
+        event.refresh_from_db()
+        self.assertEqual(str(event.event_time), "10:00:00")
+
+
+class ProgressDataIsolationSecurityTests(TestCase):
+    """Verificación estricta de aislamiento de datos en /api/progress/?event=."""
+
+    def setUp(self):
+        self.user_a = User.objects.create_user("user_a", password="x")
+        self.user_b = User.objects.create_user("user_b", password="x")
+        today = timezone.localdate()
+        self.event_a = Event.objects.create(user=self.user_a, name="Evento A", event_date=today)
+        self.client.force_login(self.user_b)
+
+    def test_cannot_query_foreign_event_progress(self):
+        response = self.client.get(f"/api/progress/?event={self.event_a.id}")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {"error": "El evento no existe o fue eliminado."})

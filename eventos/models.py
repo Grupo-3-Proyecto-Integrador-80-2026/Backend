@@ -96,6 +96,11 @@ class Event(models.Model):
     event_date = models.DateField(
         help_text="Fecha en la que se llevará a cabo el evento."
     )
+    event_time = models.TimeField(
+        null=True,
+        blank=True,
+        help_text="Hora en la que se llevará a cabo el evento (opcional, formato HH:MM).",
+    )
     description = models.TextField(
         blank=True, null=True, help_text="Descripción o notas del evento."
     )
