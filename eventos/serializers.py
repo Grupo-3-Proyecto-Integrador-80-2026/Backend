@@ -262,6 +262,7 @@ class EventSerializer(serializers.ModelSerializer):
             "contact",
             "location",
             "event_date",
+            "event_time",
             "description",
             "status",
             "created_at",
@@ -287,8 +288,13 @@ class EventSerializer(serializers.ModelSerializer):
                     "null": "La fecha del evento es obligatoria.",
                 }
             },
+            "event_time": {
+                "error_messages": {
+                    "invalid": "Ingresa una hora válida en formato HH:MM o HH:MM:SS.",
+                }
+            },
         }
-
+        
     def get_progress(self, obj):
         return calculate_progress_data(obj)
 
